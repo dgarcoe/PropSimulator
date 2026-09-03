@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "propsimulator"
+version = "0.1.0"
+description = "HF skywave propagation model: solar activity to signal-to-noise ratio"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+api = ["fastapi>=0.110", "uvicorn>=0.27", "pydantic>=2.0"]
+dev = ["pytest>=7.4", "httpx>=0.27"]
+
+[project.scripts]
+propsim = "propsim.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["propsim*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

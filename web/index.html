@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PropSimulator</title>
+<style>
+  :root{
+    --bg:#f7f7f5; --panel:#fff; --ink:#1b1b1a; --muted:#6b6b66;
+    --line:#e2e2dd; --accent:#2f6f4f; --warn:#a8541f; --bad:#a33; --good:#2f6f4f;
+    --grid:#ececE7;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{--bg:#16171a;--panel:#1e2024;--ink:#e8e8e4;--muted:#9a9a94;
+          --line:#2e3136;--accent:#6fbf8f;--warn:#d9915a;--bad:#e07a7a;--good:#6fbf8f;--grid:#282b30;}
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  header{padding:20px 24px;border-bottom:1px solid var(--line);background:var(--panel)}
+  h1{margin:0;font-size:19px;font-weight:600;letter-spacing:-.01em}
+  header p{margin:4px 0 0;color:var(--muted);font-size:13px}
+  main{display:grid;grid-template-columns:minmax(300px,360px) 1fr;gap:0;min-height:calc(100vh - 74px)}
+  @media (max-width:860px){main{grid-template-columns:1fr}}
+  form{padding:20px 24px;border-right:1px solid var(--line);background:var(--panel)}
+  fieldset{border:0;padding:0;margin:0 0 20px}
+  legend{font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.06em;
+         color:var(--muted);margin-bottom:10px;padding:0}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px}
+  label{display:block;font-size:12px;color:var(--muted);margin-bottom:3px}
+  input,select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:5px;
+               background:var(--bg);color:var(--ink);font:inherit;font-size:13px}
+  input:focus,select:focus{outline:2px solid var(--accent);outline-offset:-1px}
+  .unit{color:var(--muted);font-weight:400}
+  button{width:100%;padding:10px;border:0;border-radius:6px;background:var(--accent);
+         color:#fff;font:inherit;font-weight:600;cursor:pointer}
+  button:disabled{opacity:.55;cursor:progress}
+  section{padding:20px 24px;overflow:auto}
+  .cards{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px}
+  .card{flex:1;min-width:110px;background:var(--panel);border:1px solid var(--line);
+        border-radius:8px;padding:12px 14px}
+  .card .k{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+  .card .v{font-size:22px;font-weight:600;margin-top:2px;font-variant-numeric:tabular-nums}
+  table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;font-size:13px}
+  th,td{padding:7px 9px;text-align:right;border-bottom:1px solid var(--line)}
+  th:first-child,td:first-child{text-align:left}
+  th{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600}
+  tr.closed td{color:var(--muted)}
+  .bar{height:5px;border-radius:3px;background:var(--accent);display:block}
+  .barwrap{background:var(--grid);border-radius:3px;width:70px;display:inline-block;vertical-align:middle}
+  .good{color:var(--good)} .warn{color:var(--warn)} .bad{color:var(--bad)}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);
+     margin:24px 0 10px;font-weight:600}
+  .note{color:var(--muted);font-size:12px;margin-top:10px;max-width:60ch}
+  .err{background:#a3332211;border:1px solid var(--bad);color:var(--bad);
+       padding:10px 12px;border-radius:6px;margin-bottom:16px}
+  .placeholder{color:var(--muted);padding:40px 0;text-align:center}
+  svg{width:100%;height:auto;display:block;overflow:visible}
+  .cond{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px 18px;
+        font-size:13px;color:var(--muted)}
+  .cond b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+<header>
+  <h1>PropSimulator</h1>
+  <p>HF skywave propagation, from solar activity to signal-to-noise ratio.</p>
+</header>
+
+<main>
+<form id="f">
+  <fieldset>
+    <legend>Path</legend>
+    <div class="row">
+      <div><label>TX latitude</label><input name="tx_lat" type="number" step="any" value="40.4"></div>
+      <div><label>TX longitude</label><input name="tx_lon" type="number" step="any" value="-3.7"></div>
+    </div>
+    <div class="row">
+      <div><label>RX latitude</label><input name="rx_lat" type="number" step="any" value="51.5"></div>
+      <div><label>RX longitude</label><input name="rx_lon" type="number" step="any" value="-0.1"></div>
+    </div>
+    <div><label>Time <span class="unit">UTC</span></label><input name="when" type="datetime-local" value="2025-06-21T12:00"></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Stations</legend>
+    <div class="row">
+      <div><label>Power <span class="unit">W</span></label><input name="power_w" type="number" step="any" value="100"></div>
+      <div><label>Bandwidth <span class="unit">Hz</span></label><input name="bandwidth_hz" type="number" step="any" value="2400"></div>
+    </div>
+    <div class="row">
+      <div><label>TX height <span class="unit">m</span></label><input name="tx_h" type="number" step="any" value="15"></div>
+      <div><label>RX height <span class="unit">m</span></label><input name="rx_h" type="number" step="any" value="12"></div>
+    </div>
+    <div><label>Antenna</label>
+      <select name="antenna_type">
+        <option value="horizontal_dipole">Horizontal dipole</option>
+        <option value="inverted_v">Inverted V</option>
+        <option value="vertical_quarter_wave">Quarter-wave vertical</option>
+        <option value="short_vertical">Short vertical</option>
+        <option value="isotropic">Isotropic</option>
+      </select></div>
+    <div class="row" style="margin-top:8px">
+      <div><label>Noise figure <span class="unit">dB</span></label><input name="noise_figure_db" type="number" step="any" value="12"></div>
+      <div><label>Required SNR <span class="unit">dB</span></label><input name="required_snr_db" type="number" step="any" value="6"></div>
+    </div>
+    <div><label>Noise environment</label>
+      <select name="noise_environment">
+        <option value="quiet_rural">Quiet rural</option>
+        <option value="rural" selected>Rural</option>
+        <option value="residential">Residential</option>
+        <option value="city">City</option>
+      </select></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Space weather</legend>
+    <div class="row">
+      <div><label>F10.7 <span class="unit">sfu</span></label><input name="f107" type="number" step="any" value="140"></div>
+      <div><label>Kp <span class="unit">0&ndash;9</span></label><input name="kp" type="number" step="any" value="2"></div>
+    </div>
+    <div class="row">
+      <div><label>Sunspots</label><input name="sunspot_number" type="number" step="any" value="60"></div>
+      <div><label>X-ray class</label><input name="xray_class" type="text" placeholder="A1, C2, X5"></div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Weather</legend>
+    <div class="row">
+      <div><label>Rain <span class="unit">mm/h</span></label><input name="rain_rate_mm_h" type="number" step="any" value="0"></div>
+      <div><label>Sea state <span class="unit">0&ndash;1</span></label><input name="sea_state" type="number" step="any" value="0"></div>
+    </div>
+  </fieldset>
+
+  <button type="submit" id="go">Predict</button>
+</form>
+
+<section id="out">
+  <div class="placeholder">Set up a circuit and press Predict.</div>
+</section>
+</main>
+
+<script>
+const form = document.getElementById('f');
+const out  = document.getElementById('out');
+const go   = document.getElementById('go');
+
+function val(n){ return form.elements[n].value; }
+function num(n){ const v = parseFloat(val(n)); return Number.isFinite(v) ? v : null; }
+
+function buildRequest(){
+  const station = (h) => ({
+    antenna_type: val('antenna_type'),
+    height_m: num(h),
+    power_w: num('power_w'),
+    bandwidth_hz: num('bandwidth_hz'),
+    noise_figure_db: num('noise_figure_db'),
+    required_snr_db: num('required_snr_db'),
+    noise_environment: val('noise_environment'),
+  });
+  const sw = { f107: num('f107'), kp: num('kp'), sunspot_number: num('sunspot_number') };
+  if (val('xray_class').trim()) sw.xray_class = val('xray_class').trim();
+  return {
+    transmitter: Object.assign({ lat:num('tx_lat'), lon:num('tx_lon'), name:'TX' }, station('tx_h')),
+    receiver:    Object.assign({ lat:num('rx_lat'), lon:num('rx_lon'), name:'RX' }, station('rx_h')),
+    when: val('when') ? val('when') + ':00Z' : null,
+    space_weather: sw,
+    weather: { rain_rate_mm_h: num('rain_rate_mm_h'), sea_state: num('sea_state') },
+    low_mhz: 2, high_mhz: 30, step_mhz: 0.5,
+  };
+}
+
+const f1 = (x) => (x === null || x === undefined) ? '&mdash;' : x.toFixed(1);
+const f2 = (x) => (x === null || x === undefined) ? '&mdash;' : x.toFixed(2);
+
+function marginClass(m){ return m === null ? '' : m >= 10 ? 'good' : m >= 0 ? 'warn' : 'bad'; }
+
+function spectrum(reports, muf, lof){
+  const W = 720, H = 210, L = 46, R = 12, T = 12, B = 28;
+  const open = reports.filter(r => r.margin_db !== null);
+  if (!open.length) return '<p class="note">No frequency in the scanned range reaches the receiver.</p>';
+  const fs = reports.map(r => r.frequency_mhz);
+  const fmin = Math.min(...fs), fmax = Math.max(...fs);
+  const ms = open.map(r => r.margin_db);
+  const mmin = Math.min(-10, Math.floor(Math.min(...ms)/10)*10);
+  const mmax = Math.max(10, Math.ceil(Math.max(...ms)/10)*10);
+  const X = f => L + (f - fmin)/(fmax - fmin) * (W - L - R);
+  const Y = m => T + (mmax - m)/(mmax - mmin) * (H - T - B);
+
+  let g = '';
+  for (let m = mmin; m <= mmax; m += Math.max(10, Math.round((mmax-mmin)/6/10)*10)){
+    g += `<line x1="${L}" y1="${Y(m)}" x2="${W-R}" y2="${Y(m)}" stroke="var(--grid)"/>`
+       + `<text x="${L-6}" y="${Y(m)+4}" text-anchor="end" font-size="10" fill="var(--muted)">${m}</text>`;
+  }
+  for (let f = Math.ceil(fmin/5)*5; f <= fmax; f += 5){
+    g += `<text x="${X(f)}" y="${H-8}" text-anchor="middle" font-size="10" fill="var(--muted)">${f}</text>`;
+  }
+  g += `<line x1="${L}" y1="${Y(0)}" x2="${W-R}" y2="${Y(0)}" stroke="var(--muted)" stroke-dasharray="3 3"/>`;
+
+  // Split into contiguous runs so skip zones show as genuine gaps.
+  let runs = [], cur = [];
+  for (const r of reports){
+    if (r.margin_db === null){ if (cur.length) runs.push(cur); cur = []; }
+    else cur.push(r);
+  }
+  if (cur.length) runs.push(cur);
+  for (const run of runs){
+    if (run.length < 2) continue;
+    const d = run.map((r,i) => `${i?'L':'M'}${X(r.frequency_mhz).toFixed(1)},${Y(r.margin_db).toFixed(1)}`).join(' ');
+    g += `<path d="${d}" fill="none" stroke="var(--accent)" stroke-width="2"/>`;
+  }
+  if (muf) g += `<line x1="${X(muf)}" y1="${T}" x2="${X(muf)}" y2="${H-B}" stroke="var(--warn)" stroke-width="1.5"/>`
+              + `<text x="${X(muf)-4}" y="${T+11}" text-anchor="end" font-size="10" fill="var(--warn)">MUF</text>`;
+  if (lof) g += `<line x1="${X(lof)}" y1="${T}" x2="${X(lof)}" y2="${H-B}" stroke="var(--warn)" stroke-width="1.5" stroke-dasharray="4 3"/>`
+              + `<text x="${X(lof)+4}" y="${T+11}" font-size="10" fill="var(--warn)">LOF</text>`;
+  g += `<text x="${L}" y="${H-8}" font-size="10" fill="var(--muted)">MHz</text>`;
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Link margin against frequency">${g}</svg>`;
+}
+
+function render(d){
+  const c = d.conditions;
+  const cards = `<div class="cards">
+    <div class="card"><div class="k">MUF</div><div class="v">${f2(d.muf_mhz)}<span class="unit" style="font-size:13px"> MHz</span></div></div>
+    <div class="card"><div class="k">FOT</div><div class="v">${f2(d.fot_mhz)}<span class="unit" style="font-size:13px"> MHz</span></div></div>
+    <div class="card"><div class="k">LOF</div><div class="v">${f2(d.lof_mhz)}<span class="unit" style="font-size:13px"> MHz</span></div></div>
+    <div class="card"><div class="k">Distance</div><div class="v">${Math.round(c.distance_km)}<span class="unit" style="font-size:13px"> km</span></div></div>
+  </div>`;
+
+  const cond = `<h2>Conditions</h2><div class="cond">
+    <div>foF2 <b>${f2(c.fof2_mhz)} MHz</b></div>
+    <div>foE <b>${f2(c.foe_mhz)} MHz</b></div>
+    <div>hmF2 <b>${Math.round(c.hmf2_km)} km</b></div>
+    <div>Gyrofrequency <b>${f2(c.gyrofrequency_mhz)} MHz</b></div>
+    <div>Magnetic dip <b>${f1(c.magnetic_dip_deg)}&deg;</b></div>
+    <div>Bearing <b>${f1(c.bearing_deg)}&deg;</b></div>
+    <div>Path sunlit <b>${Math.round(c.sunlit_fraction*100)}%</b></div>
+    <div>Over sea <b>${Math.round(c.sea_fraction*100)}%</b></div>
+    <div>Terminator <b>${c.crosses_terminator ? 'crossed' : 'no'}</b></div>
+  </div>`;
+
+  const rows = d.bands.map(b => {
+    if (!b.open) return `<tr class="closed"><td>${b.band}</td><td>${f2(b.frequency_mhz)}</td>
+      <td colspan="4">closed &mdash; no ray reaches the receiver</td><td></td></tr>`;
+    const pct = Math.round(b.score*100);
+    return `<tr><td>${b.band}</td><td>${f2(b.frequency_mhz)}</td>
+      <td>${f1(b.snr_db)}</td><td class="${marginClass(b.margin_db)}">${f1(b.margin_db)}</td>
+      <td>${b.hops}</td><td>${f1(b.elevation_deg)}&deg;</td>
+      <td><span class="barwrap"><span class="bar" style="width:${pct}%"></span></span></td></tr>`;
+  }).join('');
+
+  out.innerHTML = cards + cond
+    + `<h2>Link margin against frequency</h2>` + spectrum(d.spectrum, d.muf_mhz, d.lof_mhz)
+    + `<h2>Bands</h2><table><thead><tr><th>Band</th><th>MHz</th><th>SNR dB</th>
+       <th>Margin dB</th><th>Hops</th><th>Elevation</th><th>Score</th></tr></thead><tbody>${rows}</tbody></table>`
+    + `<p class="note">Band scores combine link margin, headroom below the MUF and how well
+       the antenna works at the required elevation. They are an operational heuristic, not a
+       probability of contact. A closed band means no ray lands on the receiver &mdash; the
+       signal passes over it.</p>`;
+}
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  go.disabled = true; go.textContent = 'Computing…';
+  try{
+    const res = await fetch('/api/predict', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(buildRequest()),
+    });
+    const data = await res.json();
+    if (!res.ok){
+      const detail = Array.isArray(data.detail)
+        ? data.detail.map(x => `${(x.loc||[]).slice(-1)}: ${x.msg}`).join('; ')
+        : (data.detail || 'request rejected');
+      out.innerHTML = `<div class="err">${detail}</div>`;
+    } else render(data);
+  }catch(err){
+    out.innerHTML = `<div class="err">${err}</div>`;
+  }finally{
+    go.disabled = false; go.textContent = 'Predict';
+  }
+});
+</script>
+</body>
+</html>
