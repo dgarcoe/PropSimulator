@@ -13,6 +13,34 @@ F10.7 / Kp / X-ray  ->  Chapman D,E,F1,F2  ->  Appleton-Hartree n(h)
                                        noise               absorption
 ```
 
+## The interface
+
+A single-page dashboard: a rotatable globe carrying the ray path, the readouts
+the physics produces, and two coverage charts. Nothing is fetched from a CDN
+and there is no build step — the globe is drawn with the 2D canvas API and the
+charts are hand-built SVG, so it runs from a plain file server.
+
+Three things on it are worth knowing about.
+
+**The globe draws the surface the model reflects off.** Those coastlines are
+`propsim/coastlines.py`, the same rings the surface classifier uses to decide
+whether a mid-path ground bounce lands on sea water or on soil. A prettier
+basemap would show a coastline the physics does not use.
+
+**The white ray and the cyan path are different things.** The white arc is the
+ray at the launch angle on the slider — one hop, drawn wherever it happens to
+land, and red if it escapes. The cyan arcs are the mode the link budget was
+actually built from, repeated for each of its hops until they reach the
+receiver. Watching them disagree is the point.
+
+**A gap in a chart is a gap.** Where no ray lands at a distance, the line
+breaks instead of dipping. A skip zone is not a weak signal.
+
+Requests are split by what they cost: the readouts and the globe come from one
+call that answers in about 0.2 s and can run on every slider movement, while
+the two sweeps take seconds and are fetched separately so a slow chart never
+holds up a fast number.
+
 ## Run it in a GitHub Codespace
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/dgarcoe/PropSimulator)
@@ -209,10 +237,12 @@ propsim/
   fading.py        multipath, Rician statistics, delay spread
   reliability.py   how often the circuit works
   reference.py     independent oracles for cross-validation
+  coverage.py      field strength and usable band against distance
+  coastlines.py    simplified world outlines, shared with the globe
   cli.py
 api/main.py        FastAPI
-web/index.html     single-page interface
+web/               single-page dashboard (no build step, no CDN)
 scripts/           serve.sh, ionosonde validation harness
 .devcontainer/     GitHub Codespaces / dev container setup
-tests/             233 tests
+tests/             265 tests
 ```

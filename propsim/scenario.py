@@ -102,6 +102,14 @@ class Scenario:
     weather: Weather = field(default_factory=Weather)
     #: Number of great-circle sample points for the equivalent column.
     path_samples: int = 9
+    #: Most ground reflections a mode may use.  More hops reach further but
+    #: pay a ground loss each time, so raising it does not always help.
+    max_hops: int = 5
+    #: Scales foF2 away from the monthly median, and shifts the F2 peak
+    #: height.  Both are here rather than in the space weather because they
+    #: describe a *choice of ionosphere to model*, not a measured driver.
+    fof2_scale: float = 1.0
+    hmf2_offset_km: float = 0.0
 
     def __post_init__(self) -> None:
         if self.when.tzinfo is None:
@@ -110,6 +118,12 @@ class Scenario:
             raise ValueError("need at least three path samples")
         if self.distance_km < 1.0:
             raise ValueError("transmitter and receiver are at the same place")
+        if not 1 <= self.max_hops <= 10:
+            raise ValueError(f"max hops {self.max_hops} outside 1-10")
+        if not 0.2 <= self.fof2_scale <= 3.0:
+            raise ValueError(f"foF2 scale {self.fof2_scale} outside 0.2-3.0")
+        if not -150.0 <= self.hmf2_offset_km <= 150.0:
+            raise ValueError(f"hmF2 offset {self.hmf2_offset_km} km outside +-150")
 
     @property
     def distance_km(self) -> float:

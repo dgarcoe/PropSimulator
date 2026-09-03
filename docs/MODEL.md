@@ -100,6 +100,20 @@ and the discrepancy shows up near sunrise and sunset. This is recorded rather
 than tuned away, because matching the exponent by scaling constants would
 hide which region is actually being modelled wrongly.
 
+## The coastlines
+
+`propsim/coastlines.py` holds hand-simplified outlines at roughly 1:110 million
+detail. They are enough to place a mid-path ground bounce on the right side of
+a coastline, which is all the reflection loss depends on, and they are checked
+against fourteen named points of land and sea. They are not a survey product.
+
+Hudson Bay, the Baltic, the Black Sea, the Caspian and the Persian Gulf are
+treated as land: each is small against a hop length and enclosed by the
+landmass around it. Rings never cross the antimeridian, because both the
+point-in-polygon test and the globe projection assume a ring lives inside one
+−180…180 span; Antarctica's band closes along the pole instead, where the seam
+cannot be crossed by a ray-casting test.
+
 ## Deliberate approximations
 
 - **Spherical Earth, not WGS-84.** The path-length error is a few parts per

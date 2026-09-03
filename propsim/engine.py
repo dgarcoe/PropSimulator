@@ -241,7 +241,13 @@ class PropagationEngine:
         # frequencies, and the reliability sweep runs the same band centres
         # through every quantile's engine; memoising removes that repetition
         # rather than recomputing an identical answer.
-        self._reports: Dict[Tuple[float, Tuple[Mode, ...]], FrequencyReport] = {}
+        self._reports: Dict[
+            Tuple[float, Tuple[Mode, ...], float], FrequencyReport
+        ] = {}
+        # The range-against-elevation curve depends on frequency and mode but
+        # not on where the receiver is, so a distance sweep reuses one scan
+        # for every target rather than recomputing it per distance.
+        self._scans: Dict[Tuple[float, Mode], Tuple] = {}
         tx = scenario.transmitter.location
         rx = scenario.receiver.location
 
@@ -255,8 +261,9 @@ class PropagationEngine:
             scenario.space_weather,
             self.illumination.seasonal_phase,
             scenario.path_samples,
-            fof2_multiplier=fof2_multiplier,
+            fof2_multiplier=fof2_multiplier * scenario.fof2_scale,
             sporadic_e=sporadic_e,
+            hmf2_offset_km=scenario.hmf2_offset_km,
         )
         self.surface = path_surface_profile(tx, rx)
         self.midpoint = intermediate_point(tx, rx, 0.5)
@@ -360,14 +367,60 @@ class PropagationEngine:
         return PropagationMode(hops, elevation_deg, mode, path, absorption, budget)
 
     # -- main entry points ------------------------------------------------
+    #: Elevation samples in the range-against-elevation scan.
+    SCAN_POINTS = int((MAX_ELEVATION_DEG - MIN_ELEVATION_DEG) * 2) + 1
+
+    def scan_for(self, frequency_hz: float, mode: Mode) -> Tuple:
+        """``(probe medium, elevation scan, skip distance)``, memoised.
+
+        The medium depends weakly on elevation through the field/ray angle;
+        this probes at a representative angle to find candidate launch
+        angles, and the medium is rebuilt at the solved angle before
+        anything is charged to the budget.
+        """
+        key = (frequency_hz, mode)
+        cached = self._scans.get(key)
+        if cached is not None:
+            return cached
+
+        start_height_km = self.scenario.transmitter.antenna.height_km
+        probe = self._medium(frequency_hz, mode, 15.0)
+        scan = scan_ranges(
+            probe, start_height_km, MIN_ELEVATION_DEG, MAX_ELEVATION_DEG, self.SCAN_POINTS
+        )
+        skip = skip_distance_km(
+            probe, start_height_km, MIN_ELEVATION_DEG, MAX_ELEVATION_DEG, scan=scan
+        )
+        self._scans[key] = (probe, scan, skip)
+        return self._scans[key]
+
+    def max_hop_range_km(self, frequency_hz: float, mode: Mode = Mode.ORDINARY) -> Optional[float]:
+        """Longest single hop this frequency can make, or None if none return."""
+        _, scan, _ = self.scan_for(frequency_hz, mode)
+        reachable = [r for r in scan[1] if r is not None]
+        return max(reachable) if reachable else None
+
     def evaluate(
-        self, frequency_hz: float, modes: Sequence[Mode] = DEFAULT_MODES
+        self,
+        frequency_hz: float,
+        modes: Sequence[Mode] = DEFAULT_MODES,
+        distance_km: Optional[float] = None,
     ) -> FrequencyReport:
-        """Every way the signal reaches the receiver at this frequency."""
+        """Every way the signal reaches the receiver at this frequency.
+
+        ``distance_km`` overrides the scenario's own path length, which is
+        what a coverage sweep varies.  The ionosphere is still the column
+        built for the scenario's path: the sweep asks "how far does this
+        signal reach along this bearing", not "what if the receiver were
+        somewhere else entirely".
+        """
         if frequency_hz <= 0.0:
             raise ValueError("frequency must be positive")
+        target_distance = self._distance_km if distance_km is None else distance_km
+        if target_distance <= 0.0:
+            raise ValueError("distance must be positive")
 
-        key = (frequency_hz, tuple(modes))
+        key = (frequency_hz, tuple(modes), target_distance)
         cached = self._reports.get(key)
         if cached is not None:
             return cached
@@ -375,26 +428,15 @@ class PropagationEngine:
         found: List[PropagationMode] = []
         best_skip: Optional[float] = None
         start_height_km = self.scenario.transmitter.antenna.height_km
+        scan_points = self.SCAN_POINTS
 
-        scan_points = int((MAX_ELEVATION_DEG - MIN_ELEVATION_DEG) * 2) + 1
         for mode in modes:
-            # The medium depends weakly on elevation through the field/ray
-            # angle; probe at a representative angle, then rebuild at the
-            # solved angle before charging anything to the budget.
-            probe = self._medium(frequency_hz, mode, 15.0)
-            # The range-against-elevation curve does not depend on the hop
-            # count, so it is computed once and reused for all of them.
-            scan = scan_ranges(
-                probe, start_height_km, MIN_ELEVATION_DEG, MAX_ELEVATION_DEG, scan_points
-            )
-            candidate = skip_distance_km(
-                probe, start_height_km, MIN_ELEVATION_DEG, MAX_ELEVATION_DEG, scan=scan
-            )
+            probe, scan, candidate = self.scan_for(frequency_hz, mode)
             if candidate is not None:
                 best_skip = candidate if best_skip is None else min(best_skip, candidate)
 
-            for hops in range(1, MAX_HOPS + 1):
-                target = self._distance_km / hops
+            for hops in range(1, self.scenario.max_hops + 1):
+                target = target_distance / hops
                 if target > math.pi * EARTH_RADIUS_KM:
                     continue
                 # A target inside the skip zone has no solution by

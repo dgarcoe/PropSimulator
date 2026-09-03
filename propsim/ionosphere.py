@@ -175,6 +175,7 @@ def build_layers(
     weather: SpaceWeather,
     seasonal_phase: float = 0.0,
     fof2_multiplier: float = 1.0,
+    hmf2_offset_km: float = 0.0,
 ) -> LayerSet:
     """Build the four Chapman layers at one point.
 
@@ -272,7 +273,7 @@ def build_layers(
 
     # Peak height rises at night and with solar activity.
     f2_height = 300.0 + 45.0 * (1.0 - illumination) + 25.0 * (solar - 1.0)
-    f2_height = min(max(f2_height, 250.0), 420.0)
+    f2_height = min(max(f2_height + hmf2_offset_km, 150.0), 600.0)
     # foF2 goes as the square root of the peak density.
     f2_density *= fof2_multiplier**2
     f2_layer = Layer("F2", max(f2_density, 1e9), f2_height, 55.0, zenith)
@@ -340,6 +341,23 @@ class IonosphericProfile:
     def critical_frequency_mhz(self) -> float:
         return plasma_frequency_mhz(self.peak_density)
 
+    @property
+    def total_electron_content(self) -> float:
+        """Vertical TEC in TECU (10^16 electrons per square metre).
+
+        The trapezoidal integral of the profile over the modelled height
+        range.  It is a *partial* TEC: this model stops at 600 km, and the
+        plasmasphere above that carries a few TECU more, so the value is a
+        lower bound on what a GNSS receiver would measure.
+        """
+        heights = self.heights_km
+        densities = self.densities
+        total = 0.0
+        for i in range(len(heights) - 1):
+            step_m = (heights[i + 1] - heights[i]) * 1000.0
+            total += 0.5 * (densities[i] + densities[i + 1]) * step_m
+        return total / 1e16
+
 
 def height_grid(step_km: float = 2.0) -> List[float]:
     steps = int(round((MAX_HEIGHT_KM - MIN_HEIGHT_KM) / step_km))
@@ -354,6 +372,7 @@ def build_profile(
     step_km: float = 2.0,
     fof2_multiplier: float = 1.0,
     sporadic_e=None,
+    hmf2_offset_km: float = 0.0,
 ) -> IonosphericProfile:
     """Total electron density profile at one point: the sum of all layers.
 
@@ -363,7 +382,9 @@ def build_profile(
     thick sampled every two kilometres is a patch the model never sees, and
     the ray would pass straight through the gap between grid points.
     """
-    layers = build_layers(point, when, weather, seasonal_phase, fof2_multiplier)
+    layers = build_layers(
+        point, when, weather, seasonal_phase, fof2_multiplier, hmf2_offset_km
+    )
     heights = height_grid(step_km)
     if sporadic_e is not None:
         from .sporadic_e import refine_grid_for_layer
@@ -428,6 +449,7 @@ def build_equivalent_column(
     step_km: float = 2.0,
     fof2_multiplier: float = 1.0,
     sporadic_e=None,
+    hmf2_offset_km: float = 0.0,
 ) -> EquivalentColumn:
     """Average the ionosphere along the great circle at each height.
 
@@ -443,7 +465,8 @@ def build_equivalent_column(
     fractions = [i / (samples - 1) for i in range(samples)]
     profiles = [
         build_profile(
-            p, when, weather, seasonal_phase, step_km, fof2_multiplier, sporadic_e
+            p, when, weather, seasonal_phase, step_km, fof2_multiplier,
+            sporadic_e, hmf2_offset_km,
         )
         for p in points
     ]

@@ -121,6 +121,12 @@ class AntennaSpec:
     azimuth_deg: Optional[float] = None
     mobile: bool = False
     receive_only: bool = False
+    #: Gain this model does not derive, added to the computed pattern: a
+    #: beam's directivity, a phased array, an amplifierless preselector.
+    #: It is a declaration by the operator, not a result -- the package
+    #: models dipoles and verticals, and cannot invent a Yagi pattern for
+    #: you.  Kept separate from the computed gain for exactly that reason.
+    extra_gain_dbi: float = 0.0
 
     def __post_init__(self) -> None:
         # 0.1 m to 300 m: a legitimate antenna height in metres.  A value
@@ -138,6 +144,10 @@ class AntennaSpec:
         for name in ("feedline_loss_db", "trap_loss_db"):
             if getattr(self, name) < 0.0:
                 raise ValueError(f"{name} cannot be negative")
+        if not -20.0 <= self.extra_gain_dbi <= 40.0:
+            raise ValueError(
+                f"extra gain {self.extra_gain_dbi} dBi is outside -20 to 40 dBi"
+            )
 
     @property
     def height_km(self) -> float:
@@ -237,6 +247,7 @@ class AntennaSpec:
         )
         gain -= self._efficiency_loss_db(frequency_hz)
         gain -= self.feedline_loss_db + self.trap_loss_db
+        gain += self.extra_gain_dbi
 
         if self.azimuth_deg is not None and bearing_deg is not None:
             offset = math.radians((bearing_deg - self.azimuth_deg + 180.0) % 360.0 - 180.0)
