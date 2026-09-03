@@ -16,6 +16,7 @@ a factor; a derived relation is either right or a bug.
 | Refractive index | Appleton–Hartree, collisionless, both modes evaluated | derived, exact |
 | Sporadic E | Gaussian patch + occurrence climatology | **empirical**, entered as a probability |
 | Day-to-day spread | log-normal foF2 about the median | **empirical decile factors** |
+| Multipath fading | Rician statistics over the arriving modes | derived, validated |
 | Magnetic field | tilted dipole aligned to IGRF-2025 | approximation |
 | Ray path | Bouguer invariant / Snell / Fermat | derived, exact |
 | Turning point | bisection with `r = r_apex − w²` regularisation | derived, exact |
@@ -180,14 +181,44 @@ can *cost* a band its reliability by stealing a ray that would otherwise
 have taken a better F-layer path. On one summer mid-latitude circuit, 10 m
 goes from dead to 36% reliable while 30 m falls from 100% to 64%.
 
+## Fading: variation within a day
+
+Day-to-day variability is only half the story. Several modes normally reach
+the receiver at once — a one-hop and a two-hop, a low ray and a high ray, an
+ordinary and an extraordinary component — with slightly different path
+lengths. Their relative phases drift as the reflection heights move, so the
+resultant amplitude fades. A deterministic link budget reports the **mean**
+power and therefore overstates how much of the time a signal is usable.
+
+`propsim.fading` characterises the arriving modes by a Rician K factor (the
+dominant mode's power over the sum of the rest) and reports the depth below
+the mean exceeded for a given time availability. Reliability is judged on
+the margin *after* that fade is paid for, not on the mean-power margin.
+
+The effect is not small. On the reference circuit at 10 MHz the mean margin
+is 8.8 dB and the 90%-of-the-time margin is 1.6 dB: a link the budget calls
+comfortable is in fact marginal.
+
+Delay spread is computed from the same modes and compared with the signal
+bandwidth. Where the coherence bandwidth `1/(2π τ_rms)` falls below the
+occupied bandwidth the channel fades **selectively** rather than flat, which
+distorts the signal and cannot be cured with more power. A 2.4 kHz voice
+channel on two modes 0.6 ms apart is selective — which is why HF voice on a
+multipath path sounds the way it does.
+
+Validated against the textbook Rayleigh figures (9.77 dB at 90%, 19.98 dB at
+99%, against ~9.6 and ~20), against the large-K Gaussian limit
+`1 − 1.2816 √(2/K)`, and the Bessel `I₀` against SciPy to 1e-9 — SciPy being
+a test-only oracle, since the package itself depends on numpy alone.
+
 ## Not implemented
 
 Named so they are not mistaken for something the model quietly covers:
 
 IRI, a full IGRF expansion, horizontal refraction, three-dimensional ray
 tracing, off-great-circle propagation, travelling ionospheric disturbances,
-spread F, multipath and fading, Doppler, detailed terrain, and the
-positive/negative phase structure of geomagnetic storms.
+spread F, Doppler, detailed terrain, and the positive/negative phase
+structure of geomagnetic storms.
 
 Solar wind speed and Bz are carried and displayed but do **not** enter the
 core equations. Their field documentation says so, rather than implying a
@@ -199,6 +230,26 @@ An operational heuristic combining link margin, headroom below the MUF, and
 how well the antenna performs at the required elevation. It is **not** a
 probability of contact, and nothing in the package treats it as one.
 
+## The gap that remains open
+
+The ray tracer is validated against closed-form analysis, absorption against
+an independent index, fading against Rayleigh and Gaussian limits, noise
+against P.372, and the antenna against image theory. **The ionosphere itself
+is validated against nothing.** Its layer parameterisation for D, F1 and F2
+has never been compared with IRI or with ionosonde measurements, so its
+error is not large or small — it is unknown, which is worse.
+
+`scripts/validate_against_ionosondes.py` closes that gap: it pulls foF2, foE
+and hmF2 from the GIRO/DIDBase archive, runs the model for the same place
+and hour, and reports the distribution of modelled/observed.
+
+It has **never been run against the live service.** The environment it was
+written in blocks outbound HTTPS by policy, so its request shapes and
+response parsing come from the documented interface and are unconfirmed.
+Its offline parts — the model lookups, the ratio and summary statistics, the
+dry-run URL construction — are exercised; the network path is not. Treat the
+first real run as part of the work rather than as a finished result.
+
 ## Standing on
 
 Relative predictions across frequency, time of day and solar activity are
@@ -206,9 +257,8 @@ sound; F-region absorption is cross-validated against an independent model;
 and the output is now a reliability rather than a point estimate, which is
 the form an operational answer has to take.
 
-The known remaining weaknesses, in order: the split of absorption between
-the D and E regions is uncalibrated and diverges near sunrise and sunset;
-the layer parameterisation for D, F1 and F2 has never been checked against
-IRI or against ionosonde data, so its error is simply unknown; and the
-equivalent column cannot produce horizontal refraction or off-great-circle
-paths at all.
+The known remaining weaknesses, in order: the layer parameterisation for D,
+F1 and F2 has never been checked against observation, so its error is
+unknown; the split of absorption between the D and E regions is uncalibrated
+and diverges near sunrise and sunset; and the equivalent column cannot
+produce horizontal refraction or off-great-circle paths at all.

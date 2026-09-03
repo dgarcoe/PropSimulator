@@ -130,6 +130,9 @@ class PredictRequest(BaseModel):
     #: on the median day.  Costs several extra ionospheres.
     reliability: bool = False
     include_sporadic_e: bool = True
+    #: Fraction of the time the circuit must be usable, which sets how much
+    #: margin multipath fading is charged.
+    time_availability: float = Field(0.9, gt=0.0, lt=1.0)
 
     def to_scenario(self) -> Scenario:
         when = self.when or datetime.now(timezone.utc)
@@ -162,10 +165,13 @@ def predict(request: PredictRequest) -> dict:
 
     if request.reliability:
         predictor = ReliabilityPredictor(
-            scenario, include_sporadic_e=request.include_sporadic_e
+            scenario,
+            include_sporadic_e=request.include_sporadic_e,
+            time_availability=request.time_availability,
         )
         result["reliability"] = {
             "bands": predictor.band_reliability(),
+            "time_availability": predictor.time_availability,
             "fof2_spread": {
                 "lower_decile": predictor.spread.lower_decile,
                 "upper_decile": predictor.spread.upper_decile,

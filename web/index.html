@@ -244,6 +244,7 @@ function reliabilityBlock(r){
     <div>MUF, good day <b>${f2(m.upper_decile)} MHz</b></div>
     <div>foF2 spread <b>&times;${f2(r.fof2_spread.lower_decile)}&ndash;${f2(r.fof2_spread.upper_decile)}</b></div>
     <div>Sporadic E <b>${pct(es.probability)}${es.foes_mhz ? ' at ' + f1(es.foes_mhz) + ' MHz' : ''}</b></div>
+    <div>Time availability <b>${pct(r.time_availability)}</b></div>
   </div>`;
 
   const rows = r.bands.map(b => {
@@ -263,6 +264,7 @@ function reliabilityBlock(r){
     return `<tr><td>${b.band}</td><td>${f2(b.frequency_mhz)}</td>
       <td class="${cls}">${total}%</td>
       <td>${mgn(b.lower_decile_margin_db)}</td><td>${mgn(b.median_margin_db)}</td><td>${mgn(b.upper_decile_margin_db)}</td>
+      <td>${b.fade_margin_db ? '&minus;' + f1(b.fade_margin_db) : '&mdash;'}</td>
       <td><span class="barwrap" title="${solid}% via the F layer${fromEs ? ', +' + fromEs + '% via sporadic E' : ''}${lostToEs ? ', -' + lostToEs + '% lost to Es screening' : ''}">
         <span class="bar" style="width:${solid}%"></span><span class="bar bar-es" style="width:${fromEs}%"></span><span class="bar bar-lost" style="width:${lostToEs}%"></span>
       </span></td></tr>`;
@@ -270,14 +272,16 @@ function reliabilityBlock(r){
 
   return `<h2>Reliability</h2>${spread}
     <table><thead><tr><th>Band</th><th>MHz</th><th>Works</th>
-      <th>Margin p10</th><th>median</th><th>p90</th><th>F layer / Es</th></tr></thead>
+      <th>Margin p10</th><th>median</th><th>p90</th><th>Fade</th><th>F layer / Es</th></tr></thead>
       <tbody>${rows}</tbody></table>
     <p class="note">&ldquo;Works&rdquo; is the fraction of days the circuit closes, sampling
       the day-to-day scatter of foF2 and mixing in sporadic E at the rate it actually
       occurs. The solid bar is what the regular F layer delivers; the lighter part is
       what sporadic E adds; a faint red segment is reliability <em>lost</em> to Es
       screening, where a patch steals a ray that would otherwise have taken a better
-      F-layer path.</p>`;
+      F-layer path. The fade column is the margin surrendered to multipath: several
+      modes arrive at once and drift in and out of phase, so the signal sits below
+      the mean power the budget reports for much of the time.</p>`;
 }
 
 function render(d){

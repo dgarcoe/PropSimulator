@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
 from .absorption import AbsorptionResult, absorption_db
+from .fading import MultipathProfile, multipath_profile
 from .antenna import GroundType
 from .constants import EARTH_RADIUS_KM
 from .geodesy import intermediate_point
@@ -132,6 +133,38 @@ class FrequencyReport:
         best = self.best
         return best.budget.snr_db if best else None
 
+    def multipath(self, availability: float = 0.9) -> Optional[MultipathProfile]:
+        """How the arriving modes interfere, and what that costs in margin.
+
+        Every mode in this report reaches the receiver, so they all add
+        vectorially and their relative phases drift.  The link budget
+        reports the *mean* power; this says how far below that mean the
+        signal sits for the given fraction of the time.
+        """
+        if not self.modes:
+            return None
+        return multipath_profile(
+            [m.budget.received_power_dbw for m in self.modes],
+            [m.group_delay_ms for m in self.modes],
+            self.modes[0].budget.noise.bandwidth_hz,
+            availability,
+        )
+
+    def fade_margin_db(self, availability: float = 0.9) -> float:
+        profile = self.multipath(availability)
+        return profile.fade_margin_db if profile else 0.0
+
+    def effective_margin_db(self, availability: float = 0.9) -> Optional[float]:
+        """Margin after paying for multipath fading.
+
+        This, not :attr:`margin_db`, is what decides whether a circuit is
+        usable: a link whose *mean* signal clears the noise by 5 dB is below
+        it much of the time if several modes are fading against each other.
+        """
+        if self.margin_db is None:
+            return None
+        return self.margin_db - self.fade_margin_db(availability)
+
     def best_of_mode(self, mode: Mode) -> Optional["PropagationMode"]:
         candidates = [m for m in self.modes if m.mode is mode]
         return max(candidates, key=lambda m: m.margin_db) if candidates else None
@@ -167,6 +200,10 @@ class FrequencyReport:
             "mode_count": len(self.modes),
             "magnetoionic_mode": best.mode.value if best else None,
             "mode_splitting_db": self.mode_splitting_db,
+            "effective_margin_db": self.effective_margin_db(),
+            "multipath": (
+                self.multipath().summary() if self.multipath() else None
+            ),
             "best_mode": best.summary() if best else None,
         }
 

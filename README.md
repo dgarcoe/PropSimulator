@@ -28,6 +28,9 @@ uvicorn api.main:app --reload
 
 # tests
 pytest -q
+
+# check the ionosphere against real ionosondes (needs network)
+python scripts/validate_against_ionosondes.py --days 7
 ```
 
 ## Example
@@ -108,7 +111,9 @@ same total the budget charges.
 **Probabilities where the physics is probabilistic.** Sporadic E enters as
 an occurrence rate composed into the answer, never as a switch that is on or
 off; foF2 enters as a distribution, so the output is the fraction of days a
-circuit works rather than a single SNR presented as fact.
+circuit works rather than a single SNR presented as fact; and multipath
+fading is charged against the margin, because the budget's mean power is not
+the power the receiver has most of the time.
 
 **One flare mechanism.** X-ray flux raises D-region electron density, and
 absorption reads that density. There is no empirical flare multiplier
@@ -172,10 +177,12 @@ propsim/
   engine.py        orchestration, MUF/LOF, band report
   variability.py   day-to-day spread of foF2
   sporadic_e.py    Es climatology and patch model
+  fading.py        multipath, Rician statistics, delay spread
   reliability.py   how often the circuit works
   reference.py     independent oracles for cross-validation
   cli.py
 api/main.py        FastAPI
 web/index.html     single-page interface
-tests/             188 tests
+scripts/           ionosonde validation harness
+tests/             227 tests
 ```

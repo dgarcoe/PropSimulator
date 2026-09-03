@@ -158,7 +158,9 @@ def render_reliability(predictor, hint_hz) -> str:
         lines.append("  sporadic E not expected on this path at this time of year")
     lines += [
         "",
-        f"{'band':>6} {'MHz':>7} {'works':>7} {'p10':>8} {'median':>8} {'p90':>8}  via",
+        f"  fading charged at {predictor.time_availability * 100:.0f}% time availability",
+        "",
+        f"{'band':>6} {'MHz':>7} {'works':>7} {'p10':>8} {'median':>8} {'p90':>8} {'fade':>6}  via",
     ]
     for row in predictor.band_reliability():
         def margin(value):
@@ -178,7 +180,8 @@ def render_reliability(predictor, hint_hz) -> str:
         lines.append(
             f"{row['band']:>6} {row['frequency_mhz']:7.2f} "
             f"{row['reliability'] * 100:6.0f}% {margin(row['lower_decile_margin_db'])} "
-            f"{margin(row['median_margin_db'])} {margin(row['upper_decile_margin_db'])}  {via}"
+            f"{margin(row['median_margin_db'])} {margin(row['upper_decile_margin_db'])} "
+            f"{row['fade_margin_db']:6.1f}  {via}"
         )
     return "\n".join(lines)
 
@@ -226,6 +229,7 @@ def render(prediction) -> str:
         "",
         "Band scores are an operational heuristic combining margin, headroom",
         "below the MUF and antenna practicality. They are not probabilities.",
+        "Run with --reliability for the fraction of days each band works.",
     ]
     return "\n".join(line for line in lines if line is not None)
 

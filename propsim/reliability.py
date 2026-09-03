@@ -49,6 +49,11 @@ class FrequencyReliability:
     reliability_with_es: float = 0.0
     #: Probability such a patch is present at all.
     sporadic_e_probability: float = 0.0
+    #: Margin after multipath fading, at each sampled quantile.
+    effective_margins_db: Tuple[Optional[float], ...] = ()
+    #: Fade margin charged, dB, on the median-ionosphere day.
+    fade_margin_db: float = 0.0
+    time_availability: float = 0.9
 
     @property
     def frequency_mhz(self) -> float:
@@ -88,6 +93,8 @@ class FrequencyReliability:
             "reliability_without_es": self.reliability_without_es,
             "reliability_with_es": self.reliability_with_es,
             "sporadic_e_probability": self.sporadic_e_probability,
+            "fade_margin_db": self.fade_margin_db,
+            "time_availability": self.time_availability,
         }
 
 
@@ -105,9 +112,15 @@ class ReliabilityPredictor:
         quantiles: Sequence[float] = QUANTILES,
         spread: Optional[VariabilitySpread] = None,
         include_sporadic_e: bool = True,
+        time_availability: float = 0.9,
     ) -> None:
         self.scenario = scenario
         self.quantiles = tuple(quantiles)
+        # Two timescales, both required for an honest answer.  The quantiles
+        # sample how the ionosphere differs from day to day; the time
+        # availability charges for how the signal fades within any one of
+        # them, as several modes drift in and out of phase.
+        self.time_availability = time_availability
 
         # The median engine is needed first to know where the path runs and
         # how much of it is lit, which is what sets the spread.
@@ -161,14 +174,19 @@ class ReliabilityPredictor:
         is reported at the rate sporadic E actually occurs, not as open or
         as closed.
         """
-        margins = tuple(
-            engine.evaluate(frequency_hz).margin_db for engine in self.engines
+        reports = [engine.evaluate(frequency_hz) for engine in self.engines]
+        margins = tuple(report.margin_db for report in reports)
+        # Reliability is judged on the margin *after* multipath fading is
+        # paid for, not on the mean-power margin the budget reports.
+        effective = tuple(
+            report.effective_margin_db(self.time_availability) for report in reports
         )
-        without = reliability_from_samples(margins, self.quantiles)
+        without = reliability_from_samples(effective, self.quantiles)
 
         with_es = without
         if self.es_engines:
-            es_margin = self.es_engines[0].evaluate(frequency_hz).margin_db
+            es_report = self.es_engines[0].evaluate(frequency_hz)
+            es_margin = es_report.effective_margin_db(self.time_availability)
             with_es = 1.0 if (es_margin is not None and es_margin >= 0.0) else 0.0
 
         probability = self.sporadic_e_probability
@@ -183,6 +201,11 @@ class ReliabilityPredictor:
             reliability_without_es=without,
             reliability_with_es=with_es,
             sporadic_e_probability=probability,
+            effective_margins_db=effective,
+            fade_margin_db=self.median_engine.evaluate(frequency_hz).fade_margin_db(
+                self.time_availability
+            ),
+            time_availability=self.time_availability,
         )
 
     def band_reliability(self) -> List[dict]:
@@ -205,6 +228,7 @@ class ReliabilityPredictor:
                 "open": result.median_margin_db is not None,
                 "reliability_without_es": result.reliability_without_es,
                 "sporadic_e_probability": result.sporadic_e_probability,
+                "fade_margin_db": result.fade_margin_db,
             })
         return sorted(
             rows,
