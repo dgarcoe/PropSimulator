@@ -105,6 +105,11 @@ loss that is displayed but never subtracted — or subtracted twice under two
 names — cannot survive. The launch-angle optimiser ranks candidates by the
 same total the budget charges.
 
+**Probabilities where the physics is probabilistic.** Sporadic E enters as
+an occurrence rate composed into the answer, never as a switch that is on or
+off; foF2 enters as a distribution, so the output is the fraction of days a
+circuit works rather than a single SNR presented as fact.
+
 **One flare mechanism.** X-ray flux raises D-region electron density, and
 absorption reads that density. There is no empirical flare multiplier
 anywhere, so a blackout cannot be counted twice.
@@ -132,6 +137,10 @@ magnitude.
   and `sign(u)` is kept when clearing the `1/u` singularity.
 - **Group delay, not geometric.** The delay integrates the group index
   `1/n`, so it is the retardation a receiver measures.
+- **Batched tracing.** Rays at different launch angles share a medium and
+  differ only in the Bouguer constant, so an elevation scan is one
+  vectorised pass. Tests pin it to the single-ray tracer at 1e-12 km, and
+  the array form of Appleton–Hartree to its scalar original bit-for-bit.
 
 ## Honesty about limits
 
@@ -161,8 +170,12 @@ propsim/
   link.py          self-checking link budget
   scenario.py      Station, Weather, Scenario
   engine.py        orchestration, MUF/LOF, band report
+  variability.py   day-to-day spread of foF2
+  sporadic_e.py    Es climatology and patch model
+  reliability.py   how often the circuit works
+  reference.py     independent oracles for cross-validation
   cli.py
 api/main.py        FastAPI
 web/index.html     single-page interface
-tests/             152 tests
+tests/             188 tests
 ```

@@ -13,7 +13,9 @@ a factor; a derived relation is either right or a bug.
 | Path geometry | great circles on a sphere | derived |
 | Solar position | low-precision almanac series from J2000 | derived, <0.01° |
 | Ionospheric layers | alpha-Chapman D/E/F1/F2 | Chapman shape derived; E from the classical foE relation, D/F1/F2 **empirical** |
-| Refractive index | Appleton–Hartree, collisionless, both modes | derived, exact |
+| Refractive index | Appleton–Hartree, collisionless, both modes evaluated | derived, exact |
+| Sporadic E | Gaussian patch + occurrence climatology | **empirical**, entered as a probability |
+| Day-to-day spread | log-normal foF2 about the median | **empirical decile factors** |
 | Magnetic field | tilted dipole aligned to IGRF-2025 | approximation |
 | Ray path | Bouguer invariant / Snell / Fermat | derived, exact |
 | Turning point | bisection with `r = r_apex − w²` regularisation | derived, exact |
@@ -112,15 +114,80 @@ hide which region is actually being modelled wrongly.
 - **Group index `1/n`.** Exact for an isotropic cold plasma and a good
   approximation at HF, where `Y` is small.
 
+## Reliability, not a point estimate
+
+A prediction that returns one SNR is answering a question nobody has. The
+ionosphere does not repeat itself: at a given hour of a given month, foF2
+scatters around its monthly median by tens of percent, and two circuits with
+identical median SNR can differ completely in how often they actually work.
+
+`propsim.variability` treats foF2 as log-normally distributed about the
+median and characterises it by decile factors — the multipliers exceeded on
+10% and 90% of days. The spread is narrowest at mid-latitudes in daylight
+(about ±15%), and widens towards the equatorial anomaly, towards the auroral
+oval, at night, and during a storm. `propsim.reliability` evaluates the whole
+chain once per sampled quantile and reports the fraction of days the circuit
+closes.
+
+Reliability is estimated by locating where the margin crosses zero between
+bracketing quantiles. Two deliberate refusals:
+
+* **No normal fit.** It would extrapolate past the sampled range and report,
+  say, 3% for a circuit that failed at every quantile examined.
+* **No assumed monotonicity.** Near the critical frequency a *worse*
+  ionosphere can give a *better* margin, because the set of available modes
+  changes discontinuously and the ray is forced onto a different, less
+  absorbed path. Where the samples are not monotonic the estimate falls back
+  to the probability mass of the quantiles that close — coarser, but not a
+  fiction.
+
+The MUF is reported the same way, as a lower decile / median / upper decile
+spread. It is typically ±3 MHz wide, which is why quoting a MUF to two
+decimal places overstates what is known.
+
+## Sporadic E
+
+Sporadic E is a patch of intense ionisation a kilometre or two thick near
+105 km, formed by wind-shear convergence of metallic ions. It has almost
+nothing to do with solar production, and it can carry frequencies far above
+anything the regular E layer supports.
+
+It is modelled as a **probability, never as a state**. There is no fact of
+the matter about whether a patch is present on a circuit at a given hour;
+there is an occurrence rate and a distribution of foEs. Reliability composes
+the two branches:
+
+    P(Es) × reliability_with_Es + (1 − P(Es)) × reliability_without
+
+Three distinct populations are represented, because one formula cannot
+describe sporadic E everywhere: the mid-latitude wind-shear population with
+its strong summer maximum and twin morning/evening peaks; a weakly seasonal
+equatorial population tied to the electrojet; and an auroral population
+driven by particle precipitation and rising with Kp.
+
+Two details that decide whether the model works at all:
+
+* The patch is **Gaussian, not Chapman.** Chapman describes a layer in
+  photochemical equilibrium with overhead radiation; sporadic E is a
+  compressed cloud of long-lived metallic ions with no such balance, and is
+  very nearly symmetric about its peak.
+* The height grid is **refined around the patch** to 0.25 km. On the plain
+  2 km grid a 1 km-thick layer falls between samples, and the ray passes
+  straight through the gap as though nothing were there.
+
+Screening emerges from the ray tracing rather than being coded in: a patch
+can *cost* a band its reliability by stealing a ray that would otherwise
+have taken a better F-layer path. On one summer mid-latitude circuit, 10 m
+goes from dead to 36% reliable while 30 m falls from 100% to 64%.
+
 ## Not implemented
 
 Named so they are not mistaken for something the model quietly covers:
 
 IRI, a full IGRF expansion, horizontal refraction, three-dimensional ray
-tracing, off-great-circle propagation, sporadic E, travelling ionospheric
-disturbances, spread F, multipath and fading, Doppler, detailed terrain,
-hour-by-hour MUF probability distributions, and the positive/negative phase
-structure of geomagnetic storms.
+tracing, off-great-circle propagation, travelling ionospheric disturbances,
+spread F, multipath and fading, Doppler, detailed terrain, and the
+positive/negative phase structure of geomagnetic storms.
 
 Solar wind speed and Bz are carried and displayed but do **not** enter the
 core equations. Their field documentation says so, rather than implying a
@@ -135,7 +202,13 @@ probability of contact, and nothing in the package treats it as one.
 ## Standing on
 
 Relative predictions across frequency, time of day and solar activity are
-sound, and F-region absorption is now cross-validated against an independent
-model. The remaining known weakness is the D/E attribution near sunrise and
-sunset, and the absence of any day-to-day variability model: a single
-deterministic SNR overstates how much a real circuit can be relied on.
+sound; F-region absorption is cross-validated against an independent model;
+and the output is now a reliability rather than a point estimate, which is
+the form an operational answer has to take.
+
+The known remaining weaknesses, in order: the split of absorption between
+the D and E regions is uncalibrated and diverges near sunrise and sunset;
+the layer parameterisation for D, F1 and F2 has never been checked against
+IRI or against ionosonde data, so its error is simply unknown; and the
+equivalent column cannot produce horizontal refraction or off-great-circle
+paths at all.

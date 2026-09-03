@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from propsim.antenna import AntennaSpec, AntennaType, GroundType
 from propsim.engine import PropagationEngine
+from propsim.reliability import ReliabilityPredictor
 from propsim.geodesy import GeoPoint
 from propsim.noise import NoiseEnvironment
 from propsim.scenario import Scenario, Station, Weather
@@ -125,6 +126,10 @@ class PredictRequest(BaseModel):
     low_mhz: float = Field(2.0, ge=0.5, le=60)
     high_mhz: float = Field(30.0, ge=1.0, le=60)
     step_mhz: float = Field(0.5, ge=0.05, le=5)
+    #: Also compute how often the circuit works, not just whether it works
+    #: on the median day.  Costs several extra ionospheres.
+    reliability: bool = False
+    include_sporadic_e: bool = True
 
     def to_scenario(self) -> Scenario:
         when = self.when or datetime.now(timezone.utc)
@@ -153,7 +158,35 @@ def predict(request: PredictRequest) -> dict:
     prediction = engine.predict(
         request.low_mhz * 1e6, request.high_mhz * 1e6, request.step_mhz * 1e6
     )
-    return prediction.summary()
+    result = prediction.summary()
+
+    if request.reliability:
+        predictor = ReliabilityPredictor(
+            scenario, include_sporadic_e=request.include_sporadic_e
+        )
+        result["reliability"] = {
+            "bands": predictor.band_reliability(),
+            "fof2_spread": {
+                "lower_decile": predictor.spread.lower_decile,
+                "upper_decile": predictor.spread.upper_decile,
+            },
+            "sporadic_e": {
+                "probability": predictor.sporadic_e_probability,
+                "foes_mhz": (
+                    predictor.sporadic_e_layer.foes_mhz
+                    if predictor.sporadic_e_layer
+                    else None
+                ),
+            },
+            "muf_mhz": {
+                key: (value / 1e6 if value else None)
+                for key, value in predictor.muf_distribution_hz(
+                    step_hz=max(request.step_mhz * 1e6, 5e5),
+                    hint_hz=prediction.muf_hz,
+                ).items()
+            },
+        }
+    return result
 
 
 @app.post("/api/frequency")

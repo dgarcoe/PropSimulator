@@ -90,6 +90,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--high-mhz", type=float, default=30.0)
     parser.add_argument("--step-mhz", type=float, default=0.5)
     parser.add_argument("--json", action="store_true", help="emit JSON")
+    parser.add_argument(
+        "--reliability", action="store_true",
+        help="report how often the circuit works, not just the median day",
+    )
+    parser.add_argument(
+        "--no-sporadic-e", action="store_true",
+        help="exclude the sporadic-E branch from the reliability mixture",
+    )
     return parser
 
 
@@ -129,6 +137,50 @@ def build_scenario(args) -> Scenario:
             freezing=args.freezing,
         ),
     )
+
+
+def render_reliability(predictor, hint_hz) -> str:
+    muf = predictor.muf_distribution_hz(step_hz=5e5, hint_hz=hint_hz)
+    lines = [
+        "",
+        "Reliability -- fraction of days the circuit closes",
+        f"  MUF   bad day {muf['lower_decile'] / 1e6:.2f}   median "
+        f"{muf['median'] / 1e6:.2f}   good day {muf['upper_decile'] / 1e6:.2f} MHz",
+        f"  foF2 spread x{predictor.spread.lower_decile:.2f}-"
+        f"{predictor.spread.upper_decile:.2f}",
+    ]
+    if predictor.sporadic_e_layer:
+        lines.append(
+            f"  sporadic E {predictor.sporadic_e_probability * 100:.0f}% likely, "
+            f"foEs {predictor.sporadic_e_layer.foes_mhz:.1f} MHz"
+        )
+    else:
+        lines.append("  sporadic E not expected on this path at this time of year")
+    lines += [
+        "",
+        f"{'band':>6} {'MHz':>7} {'works':>7} {'p10':>8} {'median':>8} {'p90':>8}  via",
+    ]
+    for row in predictor.band_reliability():
+        def margin(value):
+            return f"{value:8.1f}" if value is not None else f"{'closed':>8}"
+
+        # Sporadic E can subtract as well as add: a patch that screens a
+        # better F-layer path costs the band reliability, and saying only
+        # "F layer" there would hide why the number fell.
+        without = row["reliability_without_es"]
+        combined = row["reliability"]
+        if combined > without + 1e-9:
+            via = "sporadic E" if without <= 1e-9 else "F layer + Es"
+        elif combined < without - 1e-9:
+            via = "F layer, Es screens"
+        else:
+            via = "F layer"
+        lines.append(
+            f"{row['band']:>6} {row['frequency_mhz']:7.2f} "
+            f"{row['reliability'] * 100:6.0f}% {margin(row['lower_decile_margin_db'])} "
+            f"{margin(row['median_margin_db'])} {margin(row['upper_decile_margin_db'])}  {via}"
+        )
+    return "\n".join(lines)
 
 
 def render(prediction) -> str:
@@ -190,7 +242,24 @@ def main(argv=None) -> int:
     prediction = engine.predict(
         args.low_mhz * 1e6, args.high_mhz * 1e6, args.step_mhz * 1e6
     )
-    print(json.dumps(prediction.summary(), indent=2) if args.json else render(prediction))
+
+    predictor = None
+    if args.reliability:
+        from .reliability import ReliabilityPredictor
+
+        predictor = ReliabilityPredictor(
+            scenario, include_sporadic_e=not args.no_sporadic_e
+        )
+
+    if args.json:
+        payload = prediction.summary()
+        if predictor is not None:
+            payload["reliability"] = predictor.summary()
+        print(json.dumps(payload, indent=2))
+    else:
+        print(render(prediction))
+        if predictor is not None:
+            print(render_reliability(predictor, prediction.muf_hz))
     return 0
 
 

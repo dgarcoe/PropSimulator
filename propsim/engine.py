@@ -179,8 +179,15 @@ class PropagationEngine:
     constructor and reused for every frequency.
     """
 
-    def __init__(self, scenario: Scenario) -> None:
+    def __init__(
+        self,
+        scenario: Scenario,
+        fof2_multiplier: float = 1.0,
+        sporadic_e=None,
+    ) -> None:
         self.scenario = scenario
+        self.fof2_multiplier = fof2_multiplier
+        self.sporadic_e = sporadic_e
         tx = scenario.transmitter.location
         rx = scenario.receiver.location
 
@@ -194,6 +201,8 @@ class PropagationEngine:
             scenario.space_weather,
             self.illumination.seasonal_phase,
             scenario.path_samples,
+            fof2_multiplier=fof2_multiplier,
+            sporadic_e=sporadic_e,
         )
         self.surface = path_surface_profile(tx, rx)
         self.midpoint = intermediate_point(tx, rx, 0.5)
@@ -329,6 +338,13 @@ class PropagationEngine:
                 target = self._distance_km / hops
                 if target > math.pi * EARTH_RADIUS_KM:
                     continue
+                # A target inside the skip zone has no solution by
+                # definition -- the shortest hop this frequency can make is
+                # already longer than the target.  Skipping the search is
+                # free and exact, not an approximation: solve_launch_angles
+                # would scan the same curve and return nothing.
+                if candidate is not None and target < candidate - 1e-9:
+                    continue
                 angles = solve_launch_angles(
                     probe,
                     target,
@@ -365,6 +381,7 @@ class PropagationEngine:
         high_hz: float = 50e6,
         step_hz: float = 2.5e5,
         tolerance_hz: float = 2.5e4,
+        hint_hz: Optional[float] = None,
     ) -> Optional[float]:
         """Highest frequency the ionosphere still returns to the receiver.
 
@@ -378,7 +395,34 @@ class PropagationEngine:
         skip zone and open again higher up on a two-hop mode.  A bare
         bisection on a non-monotonic predicate lands wherever the first
         probe happens to fall.
+
+        ``hint_hz`` narrows the scan around a known nearby answer, which is
+        what makes a MUF *distribution* affordable: the deciles sit within a
+        factor of about 1.5 of the median, so the same circuit need not be
+        rescanned from 2 MHz three times over.  The window is checked at its
+        own edges and widened to the full range if the answer is not inside
+        it, so the shortcut cannot silently return a wrong MUF.
         """
+        if hint_hz is not None and hint_hz > 0.0:
+            window_low = max(low_hz, hint_hz * 0.55)
+            window_high = min(high_hz, hint_hz * 1.75)
+            narrow = self._frequency_grid(window_low, window_high, step_hz)
+            flags = [self.evaluate(f).is_open for f in narrow]
+            # Trust the window only if it brackets the transition: open at
+            # the bottom, closed at the top.
+            if flags and flags[0] and not flags[-1]:
+                low_hz, high_hz = window_low, window_high
+                grid, open_flags = narrow, flags
+                highest_open = max(i for i, flag in enumerate(open_flags) if flag)
+                low, high = grid[highest_open], grid[highest_open + 1]
+                while high - low > tolerance_hz:
+                    mid = 0.5 * (low + high)
+                    if self.evaluate(mid).is_open:
+                        low = mid
+                    else:
+                        high = mid
+                return low
+
         grid = self._frequency_grid(low_hz, high_hz, step_hz)
         open_flags = [self.evaluate(f).is_open for f in grid]
         if not any(open_flags):
@@ -482,6 +526,9 @@ class PropagationEngine:
             "magnetic_dip_deg": self.magnetic_field.inclination_deg,
             "sea_fraction": self.surface.sea_fraction,
             "dominant_surface": self.surface.dominant.value,
+            "sporadic_e_foes_mhz": (
+                self.sporadic_e.foes_mhz if self.sporadic_e is not None else None
+            ),
         }
 
 

@@ -46,8 +46,11 @@
   th:first-child,td:first-child{text-align:left}
   th{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600}
   tr.closed td{color:var(--muted)}
-  .bar{height:5px;border-radius:3px;background:var(--accent);display:block}
-  .barwrap{background:var(--grid);border-radius:3px;width:70px;display:inline-block;vertical-align:middle}
+  .bar{height:5px;background:var(--accent);display:inline-block;vertical-align:top}
+  .bar-es{background:var(--warn);opacity:.65}
+  .bar-lost{background:var(--bad);opacity:.28}
+  .barwrap{background:var(--grid);border-radius:3px;width:70px;display:inline-block;
+           vertical-align:middle;overflow:hidden;line-height:0;font-size:0}
   .good{color:var(--good)} .warn{color:var(--warn)} .bad{color:var(--bad)}
   h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);
      margin:24px 0 10px;font-weight:600}
@@ -133,6 +136,16 @@
     </div>
   </fieldset>
 
+  <fieldset>
+    <legend>Analysis</legend>
+    <label style="display:flex;gap:8px;align-items:flex-start;color:var(--ink);font-size:13px;cursor:pointer">
+      <input type="checkbox" name="reliability" style="width:auto;margin-top:2px" checked>
+      <span>Reliability &mdash; how often the circuit works, sampling the
+        day-to-day spread of foF2 and the sporadic-E occurrence rate.
+        <span class="unit">Slower.</span></span>
+    </label>
+  </fieldset>
+
   <button type="submit" id="go">Predict</button>
 </form>
 
@@ -168,6 +181,7 @@ function buildRequest(){
     space_weather: sw,
     weather: { rain_rate_mm_h: num('rain_rate_mm_h'), sea_state: num('sea_state') },
     low_mhz: 2, high_mhz: 30, step_mhz: 0.5,
+    reliability: form.elements['reliability'].checked,
   };
 }
 
@@ -218,6 +232,54 @@ function spectrum(reports, muf, lof){
   return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Link margin against frequency">${g}</svg>`;
 }
 
+function reliabilityBlock(r){
+  if (!r) return '';
+  const m = r.muf_mhz || {};
+  const es = r.sporadic_e || {};
+  const pct = (x) => (x === null || x === undefined) ? '&mdash;' : (x*100).toFixed(0) + '%';
+
+  const spread = `<div class="cond" style="margin-bottom:14px">
+    <div>MUF, bad day <b>${f2(m.lower_decile)} MHz</b></div>
+    <div>MUF, median <b>${f2(m.median)} MHz</b></div>
+    <div>MUF, good day <b>${f2(m.upper_decile)} MHz</b></div>
+    <div>foF2 spread <b>&times;${f2(r.fof2_spread.lower_decile)}&ndash;${f2(r.fof2_spread.upper_decile)}</b></div>
+    <div>Sporadic E <b>${pct(es.probability)}${es.foes_mhz ? ' at ' + f1(es.foes_mhz) + ' MHz' : ''}</b></div>
+  </div>`;
+
+  const rows = r.bands.map(b => {
+    const total = Math.round(b.reliability*100);
+    const without = Math.round((b.reliability_without_es ?? 0)*100);
+    // Sporadic E can subtract as well as add: a patch that screens a better
+    // F-layer path lowers the band's reliability, and the bar has to show
+    // that loss rather than silently clamping it to zero.
+    const fromEs = Math.max(0, total - without);
+    const lostToEs = Math.max(0, without - total);
+    const solid = Math.min(without, total);
+    const cls = total >= 70 ? 'good' : total >= 30 ? 'warn' : 'bad';
+    // One rendering for an absent margin everywhere: a missing value here
+    // always means the same thing -- no ray landed on the receiver.
+    const mgn = (x) => (x === null || x === undefined)
+      ? '<span class="unit">closed</span>' : f1(x);
+    return `<tr><td>${b.band}</td><td>${f2(b.frequency_mhz)}</td>
+      <td class="${cls}">${total}%</td>
+      <td>${mgn(b.lower_decile_margin_db)}</td><td>${mgn(b.median_margin_db)}</td><td>${mgn(b.upper_decile_margin_db)}</td>
+      <td><span class="barwrap" title="${solid}% via the F layer${fromEs ? ', +' + fromEs + '% via sporadic E' : ''}${lostToEs ? ', -' + lostToEs + '% lost to Es screening' : ''}">
+        <span class="bar" style="width:${solid}%"></span><span class="bar bar-es" style="width:${fromEs}%"></span><span class="bar bar-lost" style="width:${lostToEs}%"></span>
+      </span></td></tr>`;
+  }).join('');
+
+  return `<h2>Reliability</h2>${spread}
+    <table><thead><tr><th>Band</th><th>MHz</th><th>Works</th>
+      <th>Margin p10</th><th>median</th><th>p90</th><th>F layer / Es</th></tr></thead>
+      <tbody>${rows}</tbody></table>
+    <p class="note">&ldquo;Works&rdquo; is the fraction of days the circuit closes, sampling
+      the day-to-day scatter of foF2 and mixing in sporadic E at the rate it actually
+      occurs. The solid bar is what the regular F layer delivers; the lighter part is
+      what sporadic E adds; a faint red segment is reliability <em>lost</em> to Es
+      screening, where a patch steals a ray that would otherwise have taken a better
+      F-layer path.</p>`;
+}
+
 function render(d){
   const c = d.conditions;
   const cards = `<div class="cards">
@@ -251,7 +313,8 @@ function render(d){
 
   out.innerHTML = cards + cond
     + `<h2>Link margin against frequency</h2>` + spectrum(d.spectrum, d.muf_mhz, d.lof_mhz)
-    + `<h2>Bands</h2><table><thead><tr><th>Band</th><th>MHz</th><th>SNR dB</th>
+    + reliabilityBlock(d.reliability)
+    + `<h2>Median-day bands</h2><table><thead><tr><th>Band</th><th>MHz</th><th>SNR dB</th>
        <th>Margin dB</th><th>Hops</th><th>Elevation</th><th>Score</th></tr></thead><tbody>${rows}</tbody></table>`
     + `<p class="note">Band scores combine link margin, headroom below the MUF and how well
        the antenna works at the required elevation. They are an operational heuristic, not a
@@ -261,7 +324,7 @@ function render(d){
 
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
-  go.disabled = true; go.textContent = 'Computing…';
+  go.disabled = true; go.textContent = form.elements['reliability'].checked ? 'Sampling ionospheres…' : 'Computing…';
   try{
     const res = await fetch('/api/predict', {
       method:'POST', headers:{'Content-Type':'application/json'},

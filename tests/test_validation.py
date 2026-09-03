@@ -290,3 +290,36 @@ class TestMagnetoionicModes:
         gyro_half = engine.magnetic_field.gyrofrequency_hz / 2.0
         assert both >= o_max
         assert both - o_max < 2.0 * gyro_half
+
+
+class TestMufSearchHint:
+    """The hinted MUF search is an optimisation, not a different answer."""
+
+    def _engine(self):
+        from propsim.antenna import AntennaSpec
+        from propsim.engine import PropagationEngine
+        from propsim.scenario import Scenario, Station
+
+        return PropagationEngine(Scenario(
+            Station(MADRID, AntennaSpec(height_m=15.0), transmit_power_w=100.0),
+            Station(LONDON, AntennaSpec(height_m=12.0)),
+            NOON, SpaceWeather(f107=140, sunspot_number=60, kp=2),
+        ))
+
+    def test_hinted_search_agrees_with_the_full_scan(self):
+        engine = self._engine()
+        full = engine.maximum_usable_frequency_hz(step_hz=5e5)
+        assert full is not None
+        for hint in (full * 0.7, full, full * 1.3):
+            hinted = engine.maximum_usable_frequency_hz(step_hz=5e5, hint_hz=hint)
+            assert hinted == pytest.approx(full, abs=1e5)
+
+    def test_a_useless_hint_falls_back_to_the_full_scan(self):
+        """A window that does not bracket the transition must be abandoned,
+        not trusted -- otherwise a bad hint silently returns a wrong MUF."""
+        engine = self._engine()
+        full = engine.maximum_usable_frequency_hz(step_hz=5e5)
+        for hint in (2.5e6, 45e6):
+            assert engine.maximum_usable_frequency_hz(
+                step_hz=5e5, hint_hz=hint
+            ) == pytest.approx(full, abs=1e5)

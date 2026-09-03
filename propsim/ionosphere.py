@@ -174,6 +174,7 @@ def build_layers(
     when: datetime,
     weather: SpaceWeather,
     seasonal_phase: float = 0.0,
+    fof2_multiplier: float = 1.0,
 ) -> LayerSet:
     """Build the four Chapman layers at one point.
 
@@ -181,7 +182,14 @@ def build_layers(
     construction by the same route as F10.7.  There is no separate optional
     X-ray argument that a caller could omit -- the flare either is in the
     scenario's space weather or it does not exist.
+
+    ``fof2_multiplier`` scales foF2 away from its monthly median, which is
+    how :mod:`propsim.variability` samples the day-to-day distribution.  It
+    multiplies the critical *frequency*, so the density it sets is scaled by
+    its square; 1.0 is the median day.
     """
+    if fof2_multiplier <= 0.0:
+        raise ValueError("foF2 multiplier must be positive")
     zenith = solar_zenith_angle_deg(point, when)
     illumination = _chapman_illumination(zenith)
     solar = _solar_scaling(weather.f107, weather.sunspot_number)
@@ -265,6 +273,8 @@ def build_layers(
     # Peak height rises at night and with solar activity.
     f2_height = 300.0 + 45.0 * (1.0 - illumination) + 25.0 * (solar - 1.0)
     f2_height = min(max(f2_height, 250.0), 420.0)
+    # foF2 goes as the square root of the peak density.
+    f2_density *= fof2_multiplier**2
     f2_layer = Layer("F2", max(f2_density, 1e9), f2_height, 55.0, zenith)
 
     return LayerSet(d_layer, e_layer, f1_layer, f2_layer)
@@ -342,11 +352,29 @@ def build_profile(
     weather: SpaceWeather,
     seasonal_phase: float = 0.0,
     step_km: float = 2.0,
+    fof2_multiplier: float = 1.0,
+    sporadic_e=None,
 ) -> IonosphericProfile:
-    """Total electron density profile at one point: the sum of all layers."""
-    layers = build_layers(point, when, weather, seasonal_phase)
+    """Total electron density profile at one point: the sum of all layers.
+
+    ``sporadic_e``, when given, is a
+    :class:`~propsim.sporadic_e.SporadicELayer` added on top of the regular
+    layers.  The height grid is refined around it first: a patch a kilometre
+    thick sampled every two kilometres is a patch the model never sees, and
+    the ray would pass straight through the gap between grid points.
+    """
+    layers = build_layers(point, when, weather, seasonal_phase, fof2_multiplier)
     heights = height_grid(step_km)
+    if sporadic_e is not None:
+        from .sporadic_e import refine_grid_for_layer
+
+        heights = refine_grid_for_layer(heights, sporadic_e)
     densities = [sum(layer.density_at(h) for layer in layers) for h in heights]
+    if sporadic_e is not None:
+        densities = [
+            density + sporadic_e.density_at(h)
+            for density, h in zip(densities, heights)
+        ]
     return IonosphericProfile(
         heights_km=heights,
         densities=densities,
@@ -398,6 +426,8 @@ def build_equivalent_column(
     seasonal_phase: float = 0.0,
     samples: int = 9,
     step_km: float = 2.0,
+    fof2_multiplier: float = 1.0,
+    sporadic_e=None,
 ) -> EquivalentColumn:
     """Average the ionosphere along the great circle at each height.
 
@@ -411,7 +441,12 @@ def build_equivalent_column(
         raise ValueError("need at least two sample points")
     points = path_points(tx, rx, samples)
     fractions = [i / (samples - 1) for i in range(samples)]
-    profiles = [build_profile(p, when, weather, seasonal_phase, step_km) for p in points]
+    profiles = [
+        build_profile(
+            p, when, weather, seasonal_phase, step_km, fof2_multiplier, sporadic_e
+        )
+        for p in points
+    ]
 
     heights = profiles[0].heights_km
     mean_densities = [
