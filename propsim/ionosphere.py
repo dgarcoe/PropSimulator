@@ -72,7 +72,13 @@ def electron_density_from_plasma_frequency(frequency_hz: float) -> float:
 #: and forcing one exponent through both leaves the collision frequency
 #: several times too high at E-layer heights -- which shows up directly as
 #: too much absorption for every ray that grazes the E layer.
-_NU_A, _NU_B, _NU_C = 7.88, 9.0e-3, -3.444e-4
+#: Least-squares fit over all seven reference heights (60-120 km) rather
+#: than an exact fit through three of them.  The reference values are not
+#: perfectly smooth -- they imply a factor of ten between 100 and 110 km and
+#: only three between 110 and 120 -- so no quadratic reproduces them all;
+#: the worst deviation is 1.55x, at 110 km.  That residual is documented
+#: rather than absorbed into a tuning constant.
+_NU_A, _NU_B, _NU_C = 7.54528, 1.710708e-2, -3.933216e-4
 
 
 def collision_frequency_hz(height_km: float) -> float:
@@ -199,7 +205,29 @@ def build_layers(
     d_layer = Layer("D", max(d_density, 0.0), 75.0, 5.0, zenith)
 
     # ---- E region ------------------------------------------------------
-    e_density = 1.5e11 * solar * illumination
+    # The classical empirical relation, rather than a parameterisation of
+    # this package's own invention:
+    #
+    #     foE = 0.9 * [(180 + 1.44 R12) cos(chi)]^0.25   MHz
+    #
+    # It is the long-standing expression behind E-layer prediction, it
+    # carries both the solar-activity and the zenith-angle dependence, and
+    # it is checkable against a source outside this code base.  An earlier
+    # invented form matched its *shape* exactly but sat 9.9% high in foE --
+    # 21% in density, which the absorption integral pays for directly,
+    # since the E region dominates the loss for a ray that crosses it.
+    # No clamp on the zenith angle here.  Clamping it to 89 degrees, as the
+    # reference oracle does to guard its own division, would treat local
+    # midnight as though the Sun sat one degree above the horizon and leave
+    # the night-time E layer nearly three times too dense.  Below the
+    # horizon the relation simply does not apply and the nocturnal residue
+    # takes over, which it reaches smoothly as cos(chi) goes to zero.
+    cos_chi = math.cos(math.radians(zenith))
+    if cos_chi > 0.0:
+        foe_mhz = 0.9 * ((180.0 + 1.44 * weather.sunspot_number) * cos_chi) ** 0.25
+        e_density = (foe_mhz * 1e6 / PLASMA_FREQ_COEFF_HZ) ** 2
+    else:
+        e_density = 0.0
     e_density = max(e_density, 3.0e9)     # weak nocturnal residue
     # 8 km: E-region scale heights run 5-10 km.  The Chapman topside falls
     # with twice the scale height, so a thicker E leaks density up into the

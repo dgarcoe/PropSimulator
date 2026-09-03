@@ -25,8 +25,8 @@ from enum import Enum
 
 from .constants import GYRO_FREQ_COEFF_HZ, PLASMA_FREQ_COEFF_HZ
 
-__all__ = ["Mode", "refractive_index_squared", "refractive_index",
-           "reflection_density", "x_parameter", "y_parameter"]
+__all__ = ["Mode", "refractive_index_squared", "refractive_index_squared_array",
+           "refractive_index", "reflection_density", "x_parameter", "y_parameter"]
 
 
 class Mode(str, Enum):
@@ -108,6 +108,61 @@ def refractive_index_squared(
     if abs(denominator) < 1e-300:
         return -math.inf             # resonance: the mode cannot propagate
     return 1.0 - x * u / denominator
+
+
+def refractive_index_squared_array(
+    electron_density,
+    frequency_hz: float,
+    magnetic_field_tesla: float = 0.0,
+    theta_rad: float = math.pi / 2.0,
+    mode: Mode = Mode.ORDINARY,
+):
+    """Vectorised twin of :func:`refractive_index_squared`.
+
+    Same algebra, same branches, evaluated over a numpy array of densities.
+    A profile table is thousands of evaluations and a Python loop over them
+    dominated the whole prediction; this is the same formula written once
+    more for arrays.  ``test_vectorised_index_matches_the_scalar_form``
+    asserts the two agree to machine precision over the full parameter
+    space, so they cannot drift apart.
+    """
+    import numpy as _np
+
+    density = _np.asarray(electron_density, dtype=float)
+    if frequency_hz <= 0.0:
+        raise ValueError("frequency must be positive")
+
+    plasma_hz = PLASMA_FREQ_COEFF_HZ * _np.sqrt(_np.clip(density, 0.0, None))
+    x = (plasma_hz / frequency_hz) ** 2
+    y = GYRO_FREQ_COEFF_HZ * abs(magnetic_field_tesla) / frequency_hz
+
+    if y == 0.0:
+        return 1.0 - x
+
+    y_long = y * math.cos(theta_rad)
+    y_tran = y * math.sin(theta_rad)
+    u = 1.0 - x
+
+    a = 0.5 * y_tran**2
+    magnitude = _np.hypot(a, y_long * u)
+    root = _np.where(u != 0.0, _np.copysign(magnitude, u), magnitude)
+
+    if mode is Mode.ORDINARY:
+        floor = magnitude + a
+        stable = 1.0 - x / (1.0 + (y_long**2) * u / _np.where(floor > 0.0, floor, 1.0))
+        stable = _np.where(floor > 0.0, stable, 1.0 - x)
+        fallback_denominator = u - a + root
+        fallback = 1.0 - x * u / _np.where(
+            _np.abs(fallback_denominator) < 1e-300, 1.0, fallback_denominator
+        )
+        fallback = _np.where(
+            _np.abs(fallback_denominator) < 1e-300, -_np.inf, fallback
+        )
+        return _np.where(u >= 0.0, stable, fallback)
+
+    denominator = u - a - root
+    result = 1.0 - x * u / _np.where(_np.abs(denominator) < 1e-300, 1.0, denominator)
+    return _np.where(_np.abs(denominator) < 1e-300, -_np.inf, result)
 
 
 def refractive_index(

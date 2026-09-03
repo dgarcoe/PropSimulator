@@ -38,7 +38,7 @@ import numpy as np
 from .constants import EARTH_RADIUS_KM, SPEED_OF_LIGHT
 from .ionosphere import IonosphericProfile, MAX_HEIGHT_KM
 from .magnetic import MagneticField
-from .refractive import Mode, refractive_index_squared
+from .refractive import Mode, refractive_index_squared_array
 
 __all__ = ["RayMedium", "RayPath", "RayQuadrature", "trace_ray",
            "hop_ground_range_km", "scan_ranges", "solve_launch_angles",
@@ -72,6 +72,9 @@ class RayMedium:
 
     heights_km: np.ndarray = field(init=False)
     n_squared: np.ndarray = field(init=False)
+    #: Cached turning-point candidates; see :meth:`apex_candidates`.
+    _candidates: Optional[np.ndarray] = field(init=False, default=None, repr=False)
+    _candidate_shared: Optional[np.ndarray] = field(init=False, default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.frequency_hz <= 0.0:
@@ -82,13 +85,10 @@ class RayMedium:
         self.heights_km = heights
         b = self.magnetic_field.magnitude if self.magnetic_field is not None else 0.0
         densities = np.asarray(self.profile.densities, dtype=float)
-        self.n_squared = np.array(
-            [
-                refractive_index_squared(
-                    float(ne), self.frequency_hz, b, self.theta_rad, self.mode
-                )
-                for ne in densities
-            ],
+        self.n_squared = np.asarray(
+            refractive_index_squared_array(
+                densities, self.frequency_hz, b, self.theta_rad, self.mode
+            ),
             dtype=float,
         )
         # An evanescent sample is a hard stop for the ray, not a number to
@@ -98,6 +98,25 @@ class RayMedium:
     @property
     def top_radius_km(self) -> float:
         return EARTH_RADIUS_KM + float(self.heights_km[-1])
+
+    def apex_candidates(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Turning-point candidate radii and ``n^2 r^2`` sampled at them.
+
+        Depends only on the medium, not on the ray, so it is built once and
+        shared by every apex search against this medium -- an elevation scan
+        makes thousands of them.
+        """
+        if self._candidates is None:
+            candidates = _turning_candidates(
+                self, EARTH_RADIUS_KM + float(self.heights_km[0]), self.top_radius_km
+            )
+            object.__setattr__(self, "_candidates", candidates)
+            object.__setattr__(
+                self,
+                "_candidate_shared",
+                self.n_squared_at_radius(candidates) * candidates**2,
+            )
+        return self._candidates, self._candidate_shared
 
     def n_squared_at_radius(self, radius_km: np.ndarray | float) -> np.ndarray:
         """n^2 at one or many radii.  Below the grid the medium is vacuum."""
@@ -277,40 +296,130 @@ def _turning_candidates(medium: RayMedium, low_km: float, high_km: float) -> np.
     return np.unique(np.concatenate(candidates))
 
 
-def _find_apex_radius(
-    medium: RayMedium, bouguer: float, start_radius_km: float
-) -> Optional[float]:
-    """First radius above the start where ``g`` reaches zero, or None.
+def _batch_apex_radii(
+    medium: RayMedium, bouguer: np.ndarray, start_radius_km: float
+) -> np.ndarray:
+    """Turning radius for many rays at once; NaN where the ray escapes.
 
-    Taking the *first* crossing matters: a ray that turns on the underside
-    of the E layer must not be reported as turning in F2 because ``g`` dips
-    again higher up.
+    Every ray in the batch sees the same medium and differs only in its
+    Bouguer constant, so the expensive part -- the candidate radii and the
+    refractive index sampled at them -- is computed once and shared.  The
+    bisection then runs as a vector operation over the whole batch.
+
+    The candidate set is the exhaustive one from
+    :func:`_turning_candidates`, so a razor tangency at a layer peak is
+    caught here exactly as it was by the scalar search this replaces.
+    :func:`trace_ray` routes through this function too -- there is one apex
+    search in the package, not a fast one and a careful one that could
+    disagree about where a ray turns.
     """
-    top = medium.top_radius_km
-    if start_radius_km >= top:
-        return None
-    if float(medium.g_at(start_radius_km, bouguer)) <= 0.0:
-        return start_radius_km
+    all_candidates, all_shared = medium.apex_candidates()
+    keep = all_candidates >= start_radius_km
+    candidates, shared = all_candidates[keep], all_shared[keep]
+    if candidates.size < 2:
+        return np.full(bouguer.shape, np.nan)
 
-    candidates = _turning_candidates(medium, start_radius_km, top)
-    g = medium.g_at(candidates, bouguer)
-    below = np.nonzero(g <= 0.0)[0]
-    if below.size == 0:
-        return None                       # never turns: the ray escapes
+    # (rays, candidates)
+    g = shared[None, :] - (bouguer**2)[:, None]
+    below = g <= 0.0
 
-    index = int(below[0])
-    low, high = float(candidates[index - 1]), float(candidates[index])
-    # g is monotonic between two consecutive candidates by construction, so
-    # bisection converges on the single crossing between them.
-    for _ in range(80):
-        mid = 0.5 * (low + high)
-        if float(medium.g_at(mid, bouguer)) > 0.0:
-            low = mid
-        else:
-            high = mid
-        if high - low < 1e-9:
+    apex = np.full(bouguer.shape, np.nan)
+    any_below = below.any(axis=1)
+    first = np.argmax(below, axis=1)          # first True per row
+
+    # A ray already evanescent at the start turns immediately.
+    start_g = float(medium.n_squared_at_radius(start_radius_km)) * start_radius_km**2
+    immediate = (start_g - bouguer**2) <= 0.0
+    apex[immediate] = start_radius_km
+
+    active = any_below & ~immediate & (first > 0)
+    if not active.any():
+        return apex
+
+    low = candidates[first[active] - 1].astype(float)
+    high = candidates[first[active]].astype(float)
+    p_active = bouguer[active]
+    # A bracket is at most one profile-grid segment wide, so ~35 halvings
+    # reach the 1e-9 km tolerance; the loop leaves as soon as it does rather
+    # than grinding out a fixed count for precision nothing can use.
+    for _ in range(50):
+        if np.all(high - low < 1e-9):
             break
-    return low
+        mid = 0.5 * (low + high)
+        g_mid = medium.n_squared_at_radius(mid) * mid**2 - p_active**2
+        positive = g_mid > 0.0
+        low = np.where(positive, mid, low)
+        high = np.where(positive, high, mid)
+    apex[active] = low
+
+    # Rows whose first crossing is candidate 0 turn at the very start.
+    edge = any_below & ~immediate & (first == 0)
+    apex[edge] = start_radius_km
+    return apex
+
+
+def _batch_hop_geometry(
+    medium: RayMedium,
+    elevations_deg: np.ndarray,
+    start_height_km: float,
+    panels: int = 48,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Ground range, geometric path and apex height for many launch angles.
+
+    Returns three arrays, NaN wherever the ray escapes.  Used for the
+    elevation scan, where only the range is wanted and building a full
+    quadrature for each candidate would be wasted work.
+    """
+    start_radius = EARTH_RADIUS_KM + start_height_km
+    n_start = float(medium.index_at(start_radius))
+    beta = np.radians(np.asarray(elevations_deg, dtype=float))
+    bouguer = n_start * start_radius * np.cos(beta)
+
+    apex = _batch_apex_radii(medium, bouguer, start_radius)
+    ranges = np.full(apex.shape, np.nan)
+    paths = np.full(apex.shape, np.nan)
+    heights = apex - EARTH_RADIUS_KM
+
+    usable = np.isfinite(apex) & (apex > start_radius + 1e-9)
+    if not usable.any():
+        return ranges, paths, heights
+
+    apex_u = apex[usable]
+    p_u = bouguer[usable]
+    w_max = np.sqrt(apex_u - start_radius)                    # (rays,)
+
+    unit = np.linspace(0.0, 1.0, panels + 1)
+    edges = w_max[:, None] * unit[None, :]                    # (rays, panels+1)
+    half = 0.5 * np.diff(edges, axis=1)
+    centre = 0.5 * (edges[:, :-1] + edges[:, 1:])
+
+    # (rays, panels, nodes)
+    w = centre[:, :, None] + half[:, :, None] * _GL_NODES[None, None, :]
+    weights = _GL_WEIGHTS[None, None, :] * half[:, :, None]
+    radius = apex_u[:, None, None] - w**2
+    jacobian = 2.0 * w
+
+    n2 = medium.n_squared_at_radius(radius)
+    g = n2 * radius**2 - (p_u**2)[:, None, None]
+    # A batch ray that lands on a non-positive integrand is dropped rather
+    # than integrated: the same condition that raises in the single-ray
+    # path, expressed as an escape here so one bad angle cannot poison a
+    # whole scan.
+    healthy = (g > 0.0).all(axis=(1, 2))
+    g = np.where(g > 0.0, g, 1.0)
+    sqrt_g = np.sqrt(g)
+    common = weights * jacobian / sqrt_g
+
+    angle = np.sum(common * p_u[:, None, None] / radius, axis=(1, 2))
+    length = np.sum(common * np.sqrt(np.clip(n2, 0.0, None)) * radius, axis=(1, 2))
+
+    angle = np.where(healthy, angle, np.nan)
+    length = np.where(healthy, length, np.nan)
+
+    ranges[usable] = 2.0 * EARTH_RADIUS_KM * angle
+    paths[usable] = 2.0 * length
+    heights[~np.isfinite(apex)] = np.nan
+    return ranges, paths, heights
 
 
 def _integrate_leg(
@@ -423,7 +532,8 @@ def trace_ray(
     beta = math.radians(launch_elevation_deg)
     bouguer = n_start * start_radius * math.cos(beta)
 
-    apex_radius = _find_apex_radius(medium, bouguer, start_radius)
+    apex_array = _batch_apex_radii(medium, np.array([bouguer]), start_radius)
+    apex_radius = None if not np.isfinite(apex_array[0]) else float(apex_array[0])
     if apex_radius is None:
         return RayPath(
             launch_elevation_deg=launch_elevation_deg,
@@ -500,7 +610,8 @@ def scan_ranges(
     curve does not depend on how many hops the circuit is being tried with.
     """
     elevations = np.linspace(min_elevation_deg, max_elevation_deg, scan_points)
-    ranges = [hop_ground_range_km(medium, float(e), start_height_km) for e in elevations]
+    values, _, _ = _batch_hop_geometry(medium, elevations, start_height_km)
+    ranges = [None if not np.isfinite(v) else float(v) for v in values]
     return elevations, ranges
 
 
@@ -536,37 +647,54 @@ def solve_launch_angles(
         )
     elevations, ranges = scan
 
-    solutions: List[float] = []
+    # Collect every bracket where the traced range crosses the target.
+    lows: List[float] = []
+    highs: List[float] = []
+    low_values: List[float] = []
     for i in range(len(elevations) - 1):
         r_low, r_high = ranges[i], ranges[i + 1]
         if r_low is None or r_high is None:
             continue
         if (r_low - target_range_km) * (r_high - target_range_km) > 0.0:
             continue
+        lows.append(float(elevations[i]))
+        highs.append(float(elevations[i + 1]))
+        low_values.append(float(r_low))
 
-        low, high = float(elevations[i]), float(elevations[i + 1])
-        for _ in range(48):
-            mid = 0.5 * (low + high)
-            value = hop_ground_range_km(medium, mid, start_height_km)
-            if value is None:
-                break
-            if abs(value - target_range_km) <= 0.05 * tolerance_km:
-                low = high = mid
-                break
-            if (r_low - target_range_km) * (value - target_range_km) <= 0.0:
-                high = mid
-            else:
-                low = mid
-                r_low = value
-            if high - low < 1e-7:
-                break
-        candidate = 0.5 * (low + high)
-        achieved = hop_ground_range_km(medium, candidate, start_height_km)
-        # Verify against the *traced* range.  The solution is accepted only
-        # because the ray genuinely lands there.
-        if achieved is not None and abs(achieved - target_range_km) <= tolerance_km:
-            if not any(abs(candidate - s) < 1e-3 for s in solutions):
-                solutions.append(candidate)
+    if not lows:
+        return []
+
+    # Bisect every bracket at once: one batch trace per iteration instead of
+    # one per bracket per iteration.
+    low = np.array(lows)
+    high = np.array(highs)
+    value_at_low = np.array(low_values)
+    for _ in range(48):
+        mid = 0.5 * (low + high)
+        values, _, _ = _batch_hop_geometry(medium, mid, start_height_km)
+        finite = np.isfinite(values)
+        # An escape inside a bracket collapses it; the candidate is rejected
+        # by the verification below rather than silently accepted.
+        crosses = finite & (
+            (value_at_low - target_range_km) * (values - target_range_km) <= 0.0
+        )
+        high = np.where(crosses, mid, high)
+        low = np.where(crosses | ~finite, low, mid)
+        value_at_low = np.where(crosses | ~finite, value_at_low, values)
+        if np.all(high - low < 1e-7):
+            break
+
+    candidates = 0.5 * (low + high)
+    achieved, _, _ = _batch_hop_geometry(medium, candidates, start_height_km)
+
+    solutions: List[float] = []
+    for elevation, landed in zip(candidates, achieved):
+        # Accepted only because the ray genuinely lands there.
+        if not np.isfinite(landed) or abs(landed - target_range_km) > tolerance_km:
+            continue
+        value = float(elevation)
+        if not any(abs(value - existing) < 1e-3 for existing in solutions):
+            solutions.append(value)
 
     return sorted(solutions)
 

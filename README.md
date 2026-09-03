@@ -136,10 +136,11 @@ magnitude.
 ## Honesty about limits
 
 See [`docs/MODEL.md`](docs/MODEL.md) for what is derived, what is empirical,
-what is verified against exact solutions, and a **known calibration bias**:
-absorption runs high by roughly a factor of two to three, concentrated in the
-E region. Relative behaviour across frequency, time of day and solar activity
-is sound; absolute SNR is not yet good enough for operational planning.
+and what is cross-validated. In short: F-region absorption agrees with an
+independent absorption index to within 7% over 12–20 MHz, and foE now equals
+the classical empirical relation by construction. The known remaining gap is
+the split of absorption between the D and E regions, which shows up as a
+weaker solar-zenith dependence than the reference near sunrise and sunset.
 
 ## Layout
 
@@ -163,5 +164,5 @@ propsim/
   cli.py
 api/main.py        FastAPI
 web/index.html     single-page interface
-tests/             125 tests
+tests/             152 tests
 ```

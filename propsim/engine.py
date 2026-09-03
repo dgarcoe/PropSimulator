@@ -53,6 +53,14 @@ MIN_ELEVATION_DEG = 1.0
 MAX_ELEVATION_DEG = 60.0
 MAX_HOPS = 5
 
+#: Both magnetoionic modes are evaluated by default.  A magnetised plasma
+#: splits the wave into an ordinary and an extraordinary component that
+#: refract differently, turn at different heights and are absorbed
+#: differently -- the extraordinary one resonates near the gyrofrequency and
+#: fades first.  Evaluating only the O mode silently throws away the half of
+#: the physics that decides which of the two actually arrives.
+DEFAULT_MODES: Sequence[Mode] = (Mode.ORDINARY, Mode.EXTRAORDINARY)
+
 
 @dataclass(frozen=True)
 class PropagationMode:
@@ -124,6 +132,25 @@ class FrequencyReport:
         best = self.best
         return best.budget.snr_db if best else None
 
+    def best_of_mode(self, mode: Mode) -> Optional["PropagationMode"]:
+        candidates = [m for m in self.modes if m.mode is mode]
+        return max(candidates, key=lambda m: m.margin_db) if candidates else None
+
+    @property
+    def mode_splitting_db(self) -> Optional[float]:
+        """Margin advantage of the ordinary mode over the extraordinary one.
+
+        Positive is the usual case: the X mode sits closer to the
+        gyrofrequency resonance and absorbs more.  ``None`` means only one of
+        the two reaches the receiver at all, which happens near the MUF
+        where their turning heights differ enough to matter.
+        """
+        ordinary = self.best_of_mode(Mode.ORDINARY)
+        extraordinary = self.best_of_mode(Mode.EXTRAORDINARY)
+        if ordinary is None or extraordinary is None:
+            return None
+        return ordinary.margin_db - extraordinary.margin_db
+
     @property
     def margin_db(self) -> Optional[float]:
         best = self.best
@@ -138,6 +165,8 @@ class FrequencyReport:
             "snr_db": self.snr_db,
             "margin_db": self.margin_db,
             "mode_count": len(self.modes),
+            "magnetoionic_mode": best.mode.value if best else None,
+            "mode_splitting_db": self.mode_splitting_db,
             "best_mode": best.summary() if best else None,
         }
 
@@ -269,7 +298,7 @@ class PropagationEngine:
 
     # -- main entry points ------------------------------------------------
     def evaluate(
-        self, frequency_hz: float, modes: Sequence[Mode] = (Mode.ORDINARY,)
+        self, frequency_hz: float, modes: Sequence[Mode] = DEFAULT_MODES
     ) -> FrequencyReport:
         """Every way the signal reaches the receiver at this frequency."""
         if frequency_hz <= 0.0:
