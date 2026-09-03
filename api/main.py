@@ -168,6 +168,9 @@ def predict(request: PredictRequest) -> dict:
             scenario,
             include_sporadic_e=request.include_sporadic_e,
             time_availability=request.time_availability,
+            # Hand over the engine the band scan already used, so its cached
+            # frequency reports serve the median MUF search too.
+            median_engine=engine,
         )
         result["reliability"] = {
             "bands": predictor.band_reliability(),

@@ -1,0 +1,44 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Run PropSimulator",
+      "type": "shell",
+      "command": "bash scripts/serve.sh",
+      "problemMatcher": [],
+      "isBackground": true,
+      "group": { "kind": "build", "isDefault": true },
+      "presentation": { "reveal": "always", "panel": "dedicated" },
+      "detail": "Start the web interface on port 8000 with auto-reload"
+    },
+    {
+      "label": "Stop PropSimulator",
+      "type": "shell",
+      "command": "bash scripts/serve.sh --stop",
+      "problemMatcher": [],
+      "detail": "Stop a server started in the background"
+    },
+    {
+      "label": "Tests",
+      "type": "shell",
+      "command": "python -m pytest -q",
+      "problemMatcher": [],
+      "group": { "kind": "test", "isDefault": true },
+      "detail": "Full suite, about two minutes"
+    },
+    {
+      "label": "Tests (physics only, fast)",
+      "type": "shell",
+      "command": "python -m pytest tests/test_core_physics.py tests/test_fading.py -q",
+      "problemMatcher": [],
+      "detail": "Sub-second: constants, geometry, layers, Appleton-Hartree, fading"
+    },
+    {
+      "label": "Example prediction",
+      "type": "shell",
+      "command": "propsim --tx-lat 40.4 --tx-lon -3.7 --tx-name Madrid --rx-lat 51.5 --rx-lon -0.1 --rx-name London --f107 140 --sunspots 60 --kp 2 --reliability",
+      "problemMatcher": [],
+      "detail": "Madrid to London, with the reliability report"
+    }
+  ]
+}

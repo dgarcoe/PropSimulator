@@ -113,6 +113,7 @@ class ReliabilityPredictor:
         spread: Optional[VariabilitySpread] = None,
         include_sporadic_e: bool = True,
         time_availability: float = 0.9,
+        median_engine: Optional[PropagationEngine] = None,
     ) -> None:
         self.scenario = scenario
         self.quantiles = tuple(quantiles)
@@ -123,8 +124,18 @@ class ReliabilityPredictor:
         self.time_availability = time_availability
 
         # The median engine is needed first to know where the path runs and
-        # how much of it is lit, which is what sets the spread.
-        median = PropagationEngine(scenario, fof2_multiplier=1.0)
+        # how much of it is lit, which is what sets the spread.  A caller
+        # that has already built one for the same scenario can hand it over:
+        # it arrives with its frequency reports memoised, so the median MUF
+        # search costs nothing instead of repeating a scan already done.
+        if median_engine is not None:
+            if median_engine.fof2_multiplier != 1.0 or median_engine.sporadic_e is not None:
+                raise ValueError(
+                    "median_engine must be the undisturbed median ionosphere"
+                )
+            median = median_engine
+        else:
+            median = PropagationEngine(scenario, fof2_multiplier=1.0)
         self.spread = spread or fof2_decile_factors(
             median.geomagnetic_latitude_deg,
             median.illumination.sunlit_fraction,

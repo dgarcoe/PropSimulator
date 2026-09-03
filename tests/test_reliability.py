@@ -279,3 +279,71 @@ class TestReliabilityPredictor:
         import json
 
         json.dumps(ReliabilityPredictor(scenario()).summary(step_hz=2e6))
+
+
+class TestSharedMedianEngine:
+    """Handing over an already-built engine is an optimisation, not a
+    different calculation."""
+
+    def test_shared_engine_gives_the_same_answer(self):
+        base = scenario()
+        engine = PropagationEngine(base)
+        engine.predict(2e6, 30e6, 2e6)          # warms its report cache
+
+        shared = ReliabilityPredictor(base, median_engine=engine)
+        fresh = ReliabilityPredictor(base)
+        for a, b in zip(shared.band_reliability(), fresh.band_reliability()):
+            assert a["band"] == b["band"]
+            assert a["reliability"] == pytest.approx(b["reliability"], abs=1e-9)
+
+    def test_a_disturbed_engine_is_refused(self):
+        """Silently accepting one would compute the whole distribution about
+        the wrong centre."""
+        base = scenario()
+        with pytest.raises(ValueError, match="undisturbed median"):
+            ReliabilityPredictor(
+                base, median_engine=PropagationEngine(base, fof2_multiplier=1.2)
+            )
+        with pytest.raises(ValueError, match="undisturbed median"):
+            ReliabilityPredictor(
+                base,
+                median_engine=PropagationEngine(
+                    base, sporadic_e=SporadicELayer(foes_mhz=8.0)
+                ),
+            )
+
+
+class TestReportCache:
+    """The frequency-report memo must be a pure memoisation."""
+
+    def test_repeated_evaluation_returns_the_same_report(self):
+        engine = PropagationEngine(scenario())
+        first = engine.evaluate(14e6)
+        second = engine.evaluate(14e6)
+        assert first is second
+
+    def test_different_mode_sets_are_cached_separately(self):
+        from propsim.refractive import Mode
+
+        engine = PropagationEngine(scenario())
+        both = engine.evaluate(14e6)
+        ordinary_only = engine.evaluate(14e6, (Mode.ORDINARY,))
+        assert both is not ordinary_only
+        assert len(ordinary_only.modes) <= len(both.modes)
+
+    def test_a_cached_report_matches_an_uncached_one(self):
+        base = scenario()
+        warm = PropagationEngine(base)
+        warm.evaluate(14e6)
+        cold = PropagationEngine(base)
+        assert warm.evaluate(14e6).margin_db == pytest.approx(
+            cold.evaluate(14e6).margin_db, abs=1e-12
+        )
+
+
+class TestMultipathCache:
+    def test_multipath_is_memoised_per_availability(self):
+        report = PropagationEngine(scenario()).evaluate(14e6)
+        assert report.multipath(0.9) is report.multipath(0.9)
+        assert report.multipath(0.9) is not report.multipath(0.99)
+        assert report.multipath(0.99).fade_margin_db > report.multipath(0.9).fade_margin_db

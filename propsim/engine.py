@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .absorption import AbsorptionResult, absorption_db
 from .fading import MultipathProfile, multipath_profile
@@ -109,6 +109,13 @@ class FrequencyReport:
     frequency_hz: float
     modes: Sequence[PropagationMode]
     skip_distance_km: Optional[float]
+    #: Memo for :meth:`multipath`.  The Rician fade integral is the most
+    #: expensive thing in a report and the answer cannot change: a report is
+    #: a fixed set of modes.  Mutating the dict is allowed on a frozen
+    #: dataclass because the field itself is never rebound.
+    _multipath_cache: Dict[float, Optional[MultipathProfile]] = field(
+        default_factory=dict, compare=False, repr=False
+    )
 
     @property
     def frequency_mhz(self) -> float:
@@ -141,14 +148,18 @@ class FrequencyReport:
         reports the *mean* power; this says how far below that mean the
         signal sits for the given fraction of the time.
         """
-        if not self.modes:
-            return None
-        return multipath_profile(
-            [m.budget.received_power_dbw for m in self.modes],
-            [m.group_delay_ms for m in self.modes],
-            self.modes[0].budget.noise.bandwidth_hz,
-            availability,
-        )
+        if availability in self._multipath_cache:
+            return self._multipath_cache[availability]
+        profile = None
+        if self.modes:
+            profile = multipath_profile(
+                [m.budget.received_power_dbw for m in self.modes],
+                [m.group_delay_ms for m in self.modes],
+                self.modes[0].budget.noise.bandwidth_hz,
+                availability,
+            )
+        self._multipath_cache[availability] = profile
+        return profile
 
     def fade_margin_db(self, availability: float = 0.9) -> float:
         profile = self.multipath(availability)
@@ -191,6 +202,7 @@ class FrequencyReport:
 
     def summary(self) -> dict:
         best = self.best
+        profile = self.multipath()
         return {
             "frequency_mhz": self.frequency_mhz,
             "open": self.is_open,
@@ -201,9 +213,7 @@ class FrequencyReport:
             "magnetoionic_mode": best.mode.value if best else None,
             "mode_splitting_db": self.mode_splitting_db,
             "effective_margin_db": self.effective_margin_db(),
-            "multipath": (
-                self.multipath().summary() if self.multipath() else None
-            ),
+            "multipath": profile.summary() if profile else None,
             "best_mode": best.summary() if best else None,
         }
 
@@ -225,6 +235,13 @@ class PropagationEngine:
         self.scenario = scenario
         self.fof2_multiplier = fof2_multiplier
         self.sporadic_e = sporadic_e
+        # An engine is fixed to one scenario, one foF2 draw and one sporadic-E
+        # state, so a frequency's report cannot change under it.  The band
+        # scan, the MUF bisection and the LOF search all probe overlapping
+        # frequencies, and the reliability sweep runs the same band centres
+        # through every quantile's engine; memoising removes that repetition
+        # rather than recomputing an identical answer.
+        self._reports: Dict[Tuple[float, Tuple[Mode, ...]], FrequencyReport] = {}
         tx = scenario.transmitter.location
         rx = scenario.receiver.location
 
@@ -350,6 +367,11 @@ class PropagationEngine:
         if frequency_hz <= 0.0:
             raise ValueError("frequency must be positive")
 
+        key = (frequency_hz, tuple(modes))
+        cached = self._reports.get(key)
+        if cached is not None:
+            return cached
+
         found: List[PropagationMode] = []
         best_skip: Optional[float] = None
         start_height_km = self.scenario.transmitter.antenna.height_km
@@ -406,7 +428,9 @@ class PropagationEngine:
                         self._build_mode(frequency_hz, mode, hops, elevation, path)
                     )
 
-        return FrequencyReport(frequency_hz, tuple(found), best_skip)
+        report = FrequencyReport(frequency_hz, tuple(found), best_skip)
+        self._reports[key] = report
+        return report
 
     def _frequency_grid(self, low_hz: float, high_hz: float, step_hz: float) -> List[float]:
         count = max(2, int(round((high_hz - low_hz) / step_hz)) + 1)
@@ -441,8 +465,13 @@ class PropagationEngine:
         it, so the shortcut cannot silently return a wrong MUF.
         """
         if hint_hz is not None and hint_hz > 0.0:
-            window_low = max(low_hz, hint_hz * 0.55)
-            window_high = min(high_hz, hint_hz * 1.75)
+            # The decile MUFs track foF2, which spans roughly x0.8 to x1.2
+            # about its median, so a x0.7 to x1.4 window brackets them with
+            # room to spare.  It is checked at both edges below and widened
+            # to the full range if it does not, so tightening it trades scan
+            # width for an occasional fallback, never for a wrong answer.
+            window_low = max(low_hz, hint_hz * 0.70)
+            window_high = min(high_hz, hint_hz * 1.40)
             narrow = self._frequency_grid(window_low, window_high, step_hz)
             flags = [self.evaluate(f).is_open for f in narrow]
             # Trust the window only if it brackets the transition: open at

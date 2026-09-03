@@ -13,7 +13,36 @@ F10.7 / Kp / X-ray  ->  Chapman D,E,F1,F2  ->  Appleton-Hartree n(h)
                                        noise               absorption
 ```
 
-## Install and run
+## Run it in a GitHub Codespace
+
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/dgarcoe/PropSimulator)
+
+Nothing to install. The Codespace builds from `.devcontainer/`, installs the
+package and its dependencies, runs a quick self-check, then starts the web
+interface on port 8000 and opens it for you.
+
+A prediction takes about three seconds; ticking **Reliability** runs the whole
+chain against five draws of the ionosphere plus a sporadic-E branch, so that
+one takes about ten. Both are shown in the interface while they run.
+
+Once it is up:
+
+| | |
+|---|---|
+| `bash scripts/serve.sh` | run the server in the foreground, with auto-reload |
+| `bash scripts/serve.sh --status` | is it running, and on what URL |
+| `bash scripts/serve.sh --stop` | stop a background server |
+| `pytest -q` | the full suite, about 70 seconds |
+| `propsim --help` | the command-line interface |
+
+`Ctrl-Shift-B` runs the server; the Run and Debug panel has launch configs for
+the server, the CLI and the current test file.
+
+The server binds `0.0.0.0` rather than `localhost`. In a Codespace the port
+forwarder reaches the process from outside the container's network namespace,
+and a server bound to loopback is invisible to it.
+
+## Install and run locally
 
 ```bash
 pip install -e ".[api,dev]"
@@ -21,10 +50,10 @@ pip install -e ".[api,dev]"
 # command line
 propsim --tx-lat 40.4 --tx-lon -3.7 --tx-name Madrid \
         --rx-lat 51.5 --rx-lon -0.1 --rx-name London \
-        --time 2025-06-21T12:00:00 --f107 140 --kp 2
+        --time 2025-06-21T12:00:00 --f107 140 --kp 2 --reliability
 
 # web interface at http://127.0.0.1:8000
-uvicorn api.main:app --reload
+bash scripts/serve.sh
 
 # tests
 pytest -q
@@ -183,6 +212,7 @@ propsim/
   cli.py
 api/main.py        FastAPI
 web/index.html     single-page interface
-scripts/           ionosonde validation harness
-tests/             227 tests
+scripts/           serve.sh, ionosonde validation harness
+.devcontainer/     GitHub Codespaces / dev container setup
+tests/             233 tests
 ```

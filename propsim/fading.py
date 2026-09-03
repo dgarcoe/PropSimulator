@@ -166,12 +166,18 @@ def fade_depth_db(k_factor: float, availability: float = 0.9) -> float:
 
     target = 1.0 - availability          # outage probability
     low, high = 1e-6, 20.0
+    # Each probe integrates the density, so the iteration count is the whole
+    # cost. Stopping at a relative width of 1e-6 pins the answer to about
+    # 4e-6 dB, which is far finer than anything downstream can use, and it
+    # gets there in roughly 25 halvings instead of a fixed 60.
     for _ in range(60):
         mid = 0.5 * (low + high)
         if _rician_power_cdf(mid, k_factor) < target:
             low = mid
         else:
             high = mid
+        if high - low < 1e-6 * high:
+            break
     level = 0.5 * (low + high)
     # A fade depth is a loss relative to the mean, so it cannot be negative:
     # the 10th percentile of a fading power distribution is never above its
