@@ -26,7 +26,7 @@ from typing import Optional
 from .constants import SPEED_OF_LIGHT
 
 __all__ = ["AntennaType", "GroundType", "AntennaSpec", "GROUND_CONSTANTS",
-           "fresnel_reflection"]
+           "fresnel_reflection", "complex_permittivity", "surface_impedance"]
 
 
 class AntennaType(str, Enum):
@@ -59,6 +59,38 @@ GROUND_CONSTANTS = {
 }
 
 
+def complex_permittivity(
+    frequency_hz: float, ground: GroundType, moisture_factor: float = 1.0
+) -> complex:
+    """Relative permittivity of the ground including its conduction current.
+
+    ``eps_r - j sigma / (omega eps0)``.  The imaginary part is what makes a
+    ground lossy at all: at 3.65 MHz it is 24.6 for average ground and
+    24 600 for sea water, and that four-order-of-magnitude difference is the
+    whole reason a ground wave crosses an ocean and dies over a continent.
+    """
+    permittivity, conductivity = GROUND_CONSTANTS[ground]
+    conductivity = max(conductivity * moisture_factor, 1e-6)
+    return complex(
+        permittivity,
+        -conductivity / (2.0 * math.pi * frequency_hz * 8.8541878128e-12),
+    )
+
+
+def surface_impedance(
+    frequency_hz: float, ground: GroundType, moisture_factor: float = 1.0
+) -> complex:
+    """Normalised surface impedance ``Delta = 1 / sqrt(eps_c)``.
+
+    The single number that governs everything about a ground wave: how fast
+    it is attenuated, how far its front tilts forward -- and therefore how
+    much of it a horizontal antenna can pick up -- and how its field grows
+    with height above the surface.  Small over sea water, an appreciable
+    fraction of unity over dry rock.
+    """
+    return 1.0 / cmath.sqrt(complex_permittivity(frequency_hz, ground, moisture_factor))
+
+
 def fresnel_reflection(
     elevation_deg: float,
     frequency_hz: float,
@@ -72,11 +104,7 @@ def fresnel_reflection(
     lowers it sharply, and both change the low-angle gain of a vertical
     antenna far more than they change anything else in the link.
     """
-    permittivity, conductivity = GROUND_CONSTANTS[ground]
-    conductivity = max(conductivity * moisture_factor, 1e-6)
-
-    # Complex permittivity: eps_r - j * sigma / (omega * eps0)
-    epsilon = complex(permittivity, -conductivity / (2 * math.pi * frequency_hz * 8.8541878128e-12))
+    epsilon = complex_permittivity(frequency_hz, ground, moisture_factor)
 
     psi = math.radians(elevation_deg)          # elevation above the surface
     sin_psi = math.sin(psi)
@@ -254,6 +282,71 @@ class AntennaSpec:
             # A dipole is a figure of eight broadside to the wire.
             gain += 10.0 * math.log10(max(math.cos(offset) ** 2, 1e-3))
 
+        return gain
+
+    def ground_wave_gain_dbi(
+        self,
+        frequency_hz: float,
+        bearing_deg: Optional[float] = None,
+        moisture_factor: float = 1.0,
+    ) -> float:
+        """Gain into (or out of) the surface wave running along the ground.
+
+        This is deliberately *not* ``gain_dbi(0.0, ...)``.  At grazing
+        incidence the Fresnel coefficient tends to -1 for both
+        polarisations, so the direct ray and its image cancel and the
+        over-ground pattern collapses to a null: the space wave really does
+        vanish along the surface.  What survives there is the surface wave,
+        a different field with a different excitation, and asking the
+        space-wave pattern about it returns -70 dBi for every antenna ever
+        built.
+
+        Three things set the excitation:
+
+        * **Image.**  A vertical over ground radiates into a hemisphere, so
+          it gains 3 dB over the same radiator in free space.  A short
+          vertical monopole therefore lands on 4.77 dBi, which is the
+          300 mV/m at 1 km per kilowatt that every ground-wave chart is
+          drawn against -- derived here, not asserted.
+        * **Polarisation.**  The surface wave is vertically polarised.  Its
+          front tilts forward by the surface impedance ``Delta``, and that
+          tilt is the *only* horizontal electric field there is, so a
+          horizontal antenna couples to it down by ``|Delta|`` -- 15 dB over
+          average ground, 44 dB over sea.  This is an upper bound: it
+          assumes the wire has a component in the plane of propagation.  A
+          horizontal antenna is a poor ground-wave antenna, and over salt
+          water it is hopeless.
+        * **Height.**  The surface wave's field varies as
+          ``1 + j k h Delta`` in the first few tens of metres.  At HF over
+          sea that is nothing at all, which is why ground-wave coverage is
+          famously indifferent to how high the antenna is.
+        """
+        if frequency_hz <= 0.0:
+            raise ValueError("frequency must be positive")
+        delta = surface_impedance(frequency_hz, self.ground, moisture_factor)
+        horizontal = self.antenna_type in (
+            AntennaType.HORIZONTAL_DIPOLE,
+            AntennaType.INVERTED_V,
+        )
+
+        gain = self._free_space_gain_dbi(0.0)
+        if horizontal:
+            gain += 20.0 * math.log10(max(abs(delta), 1e-12))
+        else:
+            gain += 10.0 * math.log10(2.0)
+
+        wavenumber = 2.0 * math.pi * frequency_hz / SPEED_OF_LIGHT
+        gain += 20.0 * math.log10(
+            abs(1.0 + 1j * wavenumber * self.height_m * delta)
+        )
+
+        gain -= self._efficiency_loss_db(frequency_hz)
+        gain -= self.feedline_loss_db + self.trap_loss_db
+        gain += self.extra_gain_dbi
+
+        if self.azimuth_deg is not None and bearing_deg is not None:
+            offset = math.radians((bearing_deg - self.azimuth_deg + 180.0) % 360.0 - 180.0)
+            gain += 10.0 * math.log10(max(math.cos(offset) ** 2, 1e-3))
         return gain
 
     def best_elevation_deg(self, frequency_hz: float) -> float:

@@ -205,12 +205,36 @@ class TestEngineIntegration:
         report = self._report()
         assert report.effective_margin_db(0.99) < report.effective_margin_db(0.9)
 
-    def test_a_closed_band_has_no_multipath_and_no_margin(self):
+    def test_a_closed_band_has_nothing_to_fade_against_and_no_margin(self):
+        """45 MHz on this circuit: the ionosphere returns nothing.
+
+        What is left is the ground wave, which on a 7500 km path at 45 MHz
+        is a couple of hundred decibels below free space -- a number the
+        model can compute and not a signal.  It is the only arrival, so
+        there is nothing for it to interfere with: one route, no fading,
+        and no skywave margin at all.
+        """
         report = self._report(45e6)
         assert not report.is_open
-        assert report.multipath() is None
+        assert report.ground_wave is not None
+        assert report.ground_wave.margin_db < -100.0
+        profile = report.multipath()
+        assert profile is not None and profile.mode_count == 1
         assert report.fade_margin_db() == 0.0
         assert report.effective_margin_db() is None
+
+    def test_a_hopeless_ground_wave_is_not_counted_as_multipath(self):
+        """A route 40 dB down cannot fade the one above it.
+
+        At that ratio the resultant swings by 0.086 dB between full
+        addition and full cancellation, so counting it would inflate the
+        mode count without moving anything that depends on it.
+        """
+        report = self._report()
+        assert report.is_open
+        assert report.ground_wave in report.routes
+        assert report.ground_wave not in report.interfering_routes
+        assert report.multipath().mode_count == len(report.interfering_routes)
 
     def test_reliability_is_judged_on_the_faded_margin(self):
         from datetime import datetime, timezone

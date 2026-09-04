@@ -1,17 +1,25 @@
 # PropSimulator
 
-An HF skywave propagation model that runs the whole chain — solar activity,
+An HF propagation model that runs the whole chain — solar activity,
 ionospheric electron density, refractive index, ray path, absorption, antennas,
 noise, link budget — and ends at a signal-to-noise ratio, a MUF, a LOF and a
 band recommendation.
 
 ```
-F10.7 / Kp / X-ray  ->  Chapman D,E,F1,F2  ->  Appleton-Hartree n(h)
+F10.7 / Kp / X-ray  ->  Chapman E,F1,F2 + D  ->  Appleton-Hartree n(h)
                                                       |
         MUF / LOF / bands  <-  SNR  <-  link budget  <-  Bouguer ray path
-                                          ^                    |
-                                       noise               absorption
+                                          ^   ^                |
+                                       noise  |           absorption
+                                              |
+                              Sommerfeld ground wave (below the skip zone)
 ```
+
+Skywave *and* ground wave. Below the skip distance the ionosphere returns
+nothing, and a 56 km link on 80 metres is an ordinary contact that a
+skywave-only model calls "no path"; the surface route is computed from the
+Sommerfeld attenuation function over a Millington land/sea path, and the
+two routes compete on their link budgets rather than on a distance rule.
 
 ## The interface
 
@@ -208,10 +216,12 @@ magnitude.
 
 See [`docs/MODEL.md`](docs/MODEL.md) for what is derived, what is empirical,
 and what is cross-validated. In short: F-region absorption agrees with an
-independent absorption index to within 7% over 12–20 MHz, and foE now equals
-the classical empirical relation by construction. The known remaining gap is
-the split of absorption between the D and E regions, which shows up as a
-weaker solar-zenith dependence than the reference near sunrise and sunset.
+independent absorption index to within 6% over 12–20 MHz, foE equals the
+classical empirical relation by construction, and the ground-wave
+attenuation function agrees with SciPy's Faddeeva evaluation to better than
+10⁻⁶ dB. The known remaining gap is the solar-zenith dependence of
+absorption, which is shallower than the reference (+0.62 against +0.88) and
+so diverges near sunrise and sunset.
 
 ## Layout
 
@@ -222,12 +232,14 @@ propsim/
   geodesy.py       great-circle geometry
   solar.py         solar position, terminator, illumination
   magnetic.py      dipole field, gyrofrequency, field/ray angle
-  ionosphere.py    Chapman layers, profiles, equivalent column
+  atmosphere.py    neutral density and electron-neutral collision frequency
+  ionosphere.py    Chapman layers, D-region profile, equivalent column
   refractive.py    Appleton-Hartree
   raytrace.py      Bouguer tracer, apex search, quadrature
   absorption.py    non-deviative absorption
   antenna.py       image theory, Fresnel ground, efficiency
-  surface.py       land/sea classification, reflection loss
+  surface.py       land/sea classification, reflection loss, path sections
+  groundwave.py    Sommerfeld attenuation, Fock shadow, Millington paths
   noise.py         thermal, galactic, atmospheric, man-made, auroral
   link.py          self-checking link budget
   scenario.py      Station, Weather, Scenario
@@ -244,5 +256,5 @@ api/main.py        FastAPI
 web/               single-page dashboard (no build step, no CDN)
 scripts/           serve.sh, ionosonde validation harness
 .devcontainer/     GitHub Codespaces / dev container setup
-tests/             265 tests
+tests/             313 tests
 ```

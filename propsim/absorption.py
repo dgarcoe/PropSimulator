@@ -32,18 +32,13 @@ from typing import Dict, Optional, Sequence
 import numpy as np
 
 from .constants import ABSORPTION_COEFF, NEPER_TO_DB
-from .ionosphere import (
-    _NU_A,
-    _NU_B,
-    _NU_C,
-    EquivalentColumn,
-    collision_frequency_hz,
-)
+from .atmosphere import collision_frequency_array
+from .ionosphere import EquivalentColumn
 from .magnetic import MagneticField
 from .raytrace import RayPath
 from .refractive import Mode
 
-__all__ = ["AbsorptionResult", "absorption_db", "REGION_BOUNDS"]
+__all__ = ["AbsorptionResult", "absorption_db", "combine", "REGION_BOUNDS"]
 
 #: Height bands used for the reporting breakdown, km.
 REGION_BOUNDS = {"D": (50.0, 90.0), "E": (90.0, 150.0), "F": (150.0, 600.0)}
@@ -92,6 +87,36 @@ class AbsorptionResult:
         }
 
 
+def combine(results: Sequence[AbsorptionResult]) -> AbsorptionResult:
+    """Add up the absorption of the hops that make one circuit.
+
+    Each hop is integrated in its own ionosphere, so the totals cannot be
+    obtained by multiplying one hop's loss by the hop count -- that is only
+    right when every hop sees the same ionosphere, which is exactly what a
+    path crossing the terminator does not do.
+    """
+    if not results:
+        raise ValueError("no hops to combine")
+    regions = {key: 0.0 for key in REGION_BOUNDS}
+    non_deviative = deviative = excluded = 0.0
+    for result in results:
+        for key, value in result.by_region_db.items():
+            regions[key] = regions.get(key, 0.0) + value
+        non_deviative += result.non_deviative_db
+        deviative += result.deviative_db
+        excluded += result.excluded_path_fraction
+    return AbsorptionResult(
+        total_db=non_deviative + deviative,
+        non_deviative_db=non_deviative,
+        deviative_db=deviative,
+        by_region_db=regions,
+        excluded_path_fraction=excluded / len(results),
+        # The turning height of the highest hop: the one that decides
+        # whether the circuit is an E mode or an F mode.
+        turning_height_km=max(r.turning_height_km for r in results),
+    )
+
+
 def _local_densities(
     column: EquivalentColumn, heights_km: np.ndarray, fractions: np.ndarray
 ) -> np.ndarray:
@@ -127,12 +152,22 @@ def absorption_db(
     mode: Mode = Mode.ORDINARY,
     magnetic_field: Optional[MagneticField] = None,
     theta_rad: float = math.pi / 2.0,
+    fraction_offset: float = 0.0,
+    fraction_span: float = 1.0,
 ) -> AbsorptionResult:
     """Absorption suffered by one hop.
 
     The integral runs over the ray's own quadrature nodes, so the geometry,
     the electron density and the collision frequency are guaranteed to be
     evaluated at the same heights.
+
+    ``fraction_offset`` and ``fraction_span`` place this hop inside the whole
+    circuit.  A ray's own quadrature runs 0 to 1 across its single hop; on a
+    four-hop path the third hop occupies 0.5 to 0.75 of the circuit, and it
+    must read the ionosphere there.  Without that mapping every hop would
+    sample the ionosphere as though it were the whole path, and a circuit
+    crossing the terminator would absorb as if all four hops were in
+    daylight.
     """
     if path.escaped or path.quadrature is None:
         return AbsorptionResult(0.0, 0.0, 0.0, {k: 0.0 for k in REGION_BOUNDS}, 0.0, 0.0)
@@ -142,11 +177,11 @@ def absorption_db(
     quadrature = path.quadrature
     heights = np.asarray(quadrature.height_km, dtype=float)
     ds_km = np.asarray(quadrature.ds_weight_km, dtype=float)
-    fractions = np.clip(np.asarray(quadrature.path_fraction, dtype=float), 0.0, 1.0)
+    local = np.clip(np.asarray(quadrature.path_fraction, dtype=float), 0.0, 1.0)
+    fractions = np.clip(fraction_offset + local * fraction_span, 0.0, 1.0)
 
     densities = _local_densities(column, heights, fractions)
-    # Same fit as ionosphere.collision_frequency_hz, evaluated vectorised.
-    collisions = 10.0 ** (_NU_A + _NU_B * heights + _NU_C * heights**2)
+    collisions = collision_frequency_array(heights)
 
     omega = 2.0 * math.pi * frequency_hz
     if magnetic_field is not None:

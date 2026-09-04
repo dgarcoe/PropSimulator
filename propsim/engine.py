@@ -23,18 +23,27 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
+
 from .absorption import AbsorptionResult, absorption_db
+from .absorption import combine as combine_absorption
 from .fading import MultipathProfile, multipath_profile
 from .antenna import GroundType
-from .constants import EARTH_RADIUS_KM
-from .geodesy import intermediate_point
-from .ionosphere import EquivalentColumn, build_equivalent_column
+from .constants import EARTH_RADIUS_KM, SPEED_OF_LIGHT
+from .geodesy import destination_point, intermediate_point
+from .groundwave import GroundWaveLoss, ground_wave_loss_db
+from .ionosphere import (
+    MAX_HEIGHT_KM as IONOSPHERE_TOP_KM,
+    EquivalentColumn,
+    build_equivalent_column,
+)
 from .link import LinkBudget, build_link_budget
 from .magnetic import field_ray_angle_rad, geomagnetic_latitude_deg, magnetic_field
 from .noise import noise_budget
 from .raytrace import (
     RayMedium,
     RayPath,
+    _batch_hop_geometry,
     scan_ranges,
     skip_distance_km,
     solve_launch_angles,
@@ -43,16 +52,30 @@ from .raytrace import (
 from .refractive import Mode
 from .scenario import Scenario
 from .solar import PathIllumination, illuminate_path
-from .surface import ground_reflection_loss_db, path_surface_profile
+from .surface import (
+    classify_surface,
+    ground_reflection_loss_db,
+    path_sections,
+    path_surface_profile,
+)
 
-__all__ = ["PropagationMode", "FrequencyReport", "PropagationEngine",
-           "Prediction", "STANDARD_BANDS_MHZ"]
+__all__ = ["PropagationMode", "GroundWave", "FrequencyReport",
+           "PropagationEngine", "Prediction", "STANDARD_BANDS_MHZ"]
 
 #: Launch elevations considered.  Below 1 degree the spherical-Earth model
 #: and the neglected terrain both stop being defensible.
 MIN_ELEVATION_DEG = 1.0
 MAX_ELEVATION_DEG = 60.0
 MAX_HOPS = 5
+
+#: Longest ground range one hop can possibly have, from geometry alone.
+#: A ray that turns at the very top of the modelled profile and comes back
+#: covers ``2 R arccos(R / (R + h))``; no ionosphere can beat it, because
+#: there is no ionosphere above that height in this model to turn in.
+#: Used only to skip hop counts that cannot exist -- never to accept one.
+MAX_HOP_RANGE_KM = 2.0 * EARTH_RADIUS_KM * math.acos(
+    EARTH_RADIUS_KM / (EARTH_RADIUS_KM + IONOSPHERE_TOP_KM)
+)
 
 #: Both magnetoionic modes are evaluated by default.  A magnetised plasma
 #: splits the wave into an ordinary and an extraordinary component that
@@ -70,17 +93,29 @@ class PropagationMode:
     hops: int
     launch_elevation_deg: float
     mode: Mode
+    #: The first hop, kept for display; the circuit is :attr:`paths`.
     path: RayPath
     absorption: AbsorptionResult
     budget: LinkBudget
+    #: One traced ray per hop, each through the ionosphere above its own
+    #: stretch of the path.  They differ: on a circuit crossing the
+    #: terminator the first hop climbs into a daylit F2 and the last into a
+    #: night-time one, and their ranges and apex heights differ with it.
+    paths: Sequence[RayPath] = ()
+    hop_ranges_km: Sequence[float] = ()
+
+    @property
+    def apex_height_km(self) -> float:
+        """Highest point of the first hop, for display."""
+        return self.path.apex_height_km
 
     @property
     def total_path_km(self) -> float:
-        return self.path.geometric_path_km * self.hops
+        return sum(p.geometric_path_km for p in self.paths) or self.path.geometric_path_km
 
     @property
     def group_delay_ms(self) -> float:
-        return self.path.group_delay_ms * self.hops
+        return sum(p.group_delay_ms for p in self.paths) or self.path.group_delay_ms
 
     @property
     def margin_db(self) -> float:
@@ -94,11 +129,74 @@ class PropagationMode:
             "apex_height_km": self.path.apex_height_km,
             "virtual_height_km": self.path.virtual_height_km,
             "hop_range_km": self.path.ground_range_km,
+            "hop_ranges_km": list(self.hop_ranges_km),
+            "apex_heights_km": [p.apex_height_km for p in self.paths],
             "total_path_km": self.total_path_km,
             "group_delay_ms": self.group_delay_ms,
             "geometric_delay_ms": self.path.geometric_delay_ms * self.hops,
             "absorption": self.absorption.summary(),
             "budget": self.budget.breakdown(),
+            "via": "skywave",
+        }
+
+
+@dataclass(frozen=True)
+class GroundWave:
+    """The signal that reaches the receiver without leaving the ground.
+
+    Deliberately not a :class:`PropagationMode`.  It has no launch angle to
+    solve for, no hop count, no apex, no magnetoionic splitting and no
+    ionospheric absorption, because it never enters the ionosphere -- and a
+    class that carried all of those as zeros would invite exactly the
+    confusion of counting it as a skywave hop.  What it shares with a
+    skywave mode is the part that is genuinely common: a link budget, a
+    delay and a margin, so anything comparing routes can compare them.
+    """
+
+    frequency_hz: float
+    distance_km: float
+    loss: GroundWaveLoss
+    budget: LinkBudget
+
+    #: Read as "no ionospheric hop", and true: the wave never goes up.
+    hops: int = 0
+    launch_elevation_deg: float = 0.0
+    apex_height_km: float = 0.0
+    #: A ground wave is a single vertically polarised wave, not one of the
+    #: two magnetoionic components -- there is no magnetised plasma along
+    #: its path to split it.
+    mode: Optional[Mode] = None
+
+    @property
+    def total_path_km(self) -> float:
+        return self.distance_km
+
+    @property
+    def group_delay_ms(self) -> float:
+        """Surface distance at the speed of light.
+
+        The ground wave is the *early* arrival on any path that also has a
+        skywave: a 400 km circuit reaches the receiver in 1.3 ms along the
+        ground and in 1.7 ms via the E region, and it is the beat between
+        those two that makes the classic dusk fade on the lower bands.
+        """
+        return self.distance_km * 1e3 / SPEED_OF_LIGHT * 1e3
+
+    @property
+    def margin_db(self) -> float:
+        return self.budget.margin_db
+
+    def summary(self) -> dict:
+        return {
+            "hops": 0,
+            "launch_elevation_deg": 0.0,
+            "magnetoionic_mode": None,
+            "apex_height_km": 0.0,
+            "total_path_km": self.distance_km,
+            "group_delay_ms": self.group_delay_ms,
+            "loss": self.loss.summary(),
+            "budget": self.budget.breakdown(),
+            "via": "ground wave",
         }
 
 
@@ -109,6 +207,11 @@ class FrequencyReport:
     frequency_hz: float
     modes: Sequence[PropagationMode]
     skip_distance_km: Optional[float]
+    #: The surface-wave route, always evaluated and usually negligible.
+    #: It is kept out of :attr:`modes` on purpose: the MUF asks whether the
+    #: *ionosphere* returns a ray, and a ground wave that exists at every
+    #: frequency would answer "yes, 50 MHz" to that question forever.
+    ground_wave: Optional["GroundWave"] = None
     #: Memo for :meth:`multipath`.  The Rician fade integral is the most
     #: expensive thing in a report and the answer cannot change: a report is
     #: a fixed set of modes.  Mutating the dict is allowed on a frozen
@@ -123,7 +226,25 @@ class FrequencyReport:
 
     @property
     def is_open(self) -> bool:
+        """Whether the **ionosphere** returns a ray to the receiver.
+
+        A skywave question, and the one the MUF is defined by.  For "can
+        the receiver hear anything at all", which is what an operator
+        actually wants, see :attr:`reachable`.
+        """
         return bool(self.modes)
+
+    @property
+    def usable(self) -> bool:
+        """Whether any route clears the operator's own required SNR.
+
+        Not a threshold this package invented: ``required_snr_db`` is a
+        field of the scenario, supplied by whoever is asking.  A ground
+        wave 180 dB under the noise is a number the model can compute and
+        is not a contact, and this is what says so.
+        """
+        margin = self.overall_margin_db
+        return margin is not None and margin >= 0.0
 
     @property
     def best(self) -> Optional[PropagationMode]:
@@ -140,6 +261,61 @@ class FrequencyReport:
         best = self.best
         return best.budget.snr_db if best else None
 
+    @property
+    def routes(self) -> Sequence[object]:
+        """Every route that reaches the receiver, skywave and ground wave.
+
+        The ground wave goes last so that, on the many paths where it is
+        200 dB down, ``max`` over margin still returns the skywave mode it
+        would have returned before this existed.
+        """
+        routes = list(self.modes)
+        if self.ground_wave is not None:
+            routes.append(self.ground_wave)
+        return routes
+
+    #: An arrival this far under the strongest one cannot fade it: at 40 dB
+    #: down the amplitude ratio is 1/100, so the resultant swings by at
+    #: most 20 log10(1.01) = 0.086 dB between full addition and full
+    #: cancellation.  Counting such an arrival as multipath would inflate
+    #: the reported mode count without moving any number that depends on it.
+    NEGLIGIBLE_ARRIVAL_DB = 40.0
+
+    @property
+    def interfering_routes(self) -> Sequence[object]:
+        """The routes strong enough to fade against each other."""
+        routes = self.routes
+        if not routes:
+            return ()
+        strongest = max(r.budget.received_power_dbw for r in routes)
+        return [
+            r for r in routes
+            if r.budget.received_power_dbw
+            >= strongest - self.NEGLIGIBLE_ARRIVAL_DB
+        ]
+
+    @property
+    def best_overall(self):
+        """The strongest route by whatever mechanism, or None.
+
+        On a 56 km path on 80 metres this is the ground wave, because there
+        is no skywave at all; on a 3000 km path it is a skywave mode by a
+        margin of a hundred decibels.  Nothing chooses between the two by
+        distance -- they are both computed and the louder one wins.
+        """
+        routes = self.routes
+        return max(routes, key=lambda r: r.margin_db) if routes else None
+
+    @property
+    def overall_margin_db(self) -> Optional[float]:
+        best = self.best_overall
+        return best.margin_db if best else None
+
+    @property
+    def overall_snr_db(self) -> Optional[float]:
+        best = self.best_overall
+        return best.budget.snr_db if best else None
+
     def multipath(self, availability: float = 0.9) -> Optional[MultipathProfile]:
         """How the arriving modes interfere, and what that costs in margin.
 
@@ -151,11 +327,17 @@ class FrequencyReport:
         if availability in self._multipath_cache:
             return self._multipath_cache[availability]
         profile = None
-        if self.modes:
+        routes = self.interfering_routes
+        if routes:
+            # The ground wave is one of the interfering arrivals, not a
+            # separate world.  Where it is comparable with a skywave mode
+            # the two beat against each other -- that is the dusk fade on
+            # 160 and 80 metres -- and where it is far below one it has
+            # already been dropped by :attr:`interfering_routes`.
             profile = multipath_profile(
-                [m.budget.received_power_dbw for m in self.modes],
-                [m.group_delay_ms for m in self.modes],
-                self.modes[0].budget.noise.bandwidth_hz,
+                [r.budget.received_power_dbw for r in routes],
+                [r.group_delay_ms for r in routes],
+                routes[0].budget.noise.bandwidth_hz,
                 availability,
             )
         self._multipath_cache[availability] = profile
@@ -206,9 +388,16 @@ class FrequencyReport:
         return {
             "frequency_mhz": self.frequency_mhz,
             "open": self.is_open,
+            "usable": self.usable,
             "skip_distance_km": self.skip_distance_km,
             "snr_db": self.snr_db,
             "margin_db": self.margin_db,
+            "overall_snr_db": self.overall_snr_db,
+            "overall_margin_db": self.overall_margin_db,
+            "best_route": (self.best_overall.summary() if self.best_overall else None),
+            "ground_wave": (
+                self.ground_wave.summary() if self.ground_wave else None
+            ),
             "mode_count": len(self.modes),
             "magnetoionic_mode": best.mode.value if best else None,
             "mode_splitting_db": self.mode_splitting_db,
@@ -248,6 +437,10 @@ class PropagationEngine:
         # not on where the receiver is, so a distance sweep reuses one scan
         # for every target rather than recomputing it per distance.
         self._scans: Dict[Tuple[float, Mode], Tuple] = {}
+        self._segment_scans: Dict[Tuple, Tuple] = {}
+        # Land/sea decomposition of the path, per distance.  Frequency
+        # independent, so a band scan classifies the coastlines once.
+        self._sections: Dict[float, Sequence[Tuple[float, GroundType]]] = {}
         tx = scenario.transmitter.location
         rx = scenario.receiver.location
 
@@ -280,61 +473,235 @@ class PropagationEngine:
             self.magnetic_field, self.scenario.bearing_deg, elevation_deg
         )
 
-    def _medium(self, frequency_hz: float, mode: Mode, elevation_deg: float) -> RayMedium:
+    def _medium(
+        self,
+        frequency_hz: float,
+        mode: Mode,
+        elevation_deg: float,
+        segment: Optional[Tuple[float, float]] = None,
+    ) -> RayMedium:
+        """The refracting medium, optionally over one stretch of the path.
+
+        ``segment`` is a ``(low, high)`` pair of path fractions selecting the
+        ionosphere averaged over that stretch rather than over the whole
+        path.  A circuit that crosses the terminator has a first hop
+        in daylight and a last one in darkness -- on one such path foF2 runs
+        from 8.3 to 6.0 MHz -- and tracing every hop through the 6.5 MHz
+        average describes neither end of it.
+        """
+        profile = (
+            self.column.mean_profile if segment is None
+            else self.column.segment_profile(*segment)
+        )
         return RayMedium(
-            profile=self.column.mean_profile,
+            profile=profile,
             frequency_hz=frequency_hz,
             mode=mode,
             magnetic_field=self.magnetic_field,
             theta_rad=self._theta_rad(elevation_deg),
         )
 
-    def _ground_loss_db(self, elevation_deg: float, frequency_hz: float, hops: int) -> float:
-        """Loss at the ``hops - 1`` intermediate ground reflections."""
-        if hops <= 1:
+    def segment_fractions(self, hops: int) -> List[Tuple[float, float]]:
+        """The stretch of path each hop of an ``hops``-hop circuit covers.
+
+        Equal shares, which the hops do not take exactly -- that is the
+        whole point, since each refracts in a different ionosphere -- but
+        they stay within a fifth of each other, far finer than the nine
+        columns the path is sampled with.
+        """
+        return [(k / hops, (k + 1) / hops) for k in range(hops)]
+
+    def scan_for_segment(
+        self, frequency_hz: float, mode: Mode, segment: Tuple[float, float]
+    ) -> Tuple:
+        """``(medium, elevation scan, skip distance)`` for one path segment.
+
+        Keyed on the segment, and segments repeat across hop counts -- the
+        first half of the path is the first hop of a two-hop circuit and the
+        first two of a four-hop one -- so the scans are shared rather than
+        rebuilt.
+        """
+        key = (frequency_hz, mode, round(segment[0], 4), round(segment[1], 4))
+        cached = self._segment_scans.get(key)
+        if cached is not None:
+            return cached
+        start_height_km = self.scenario.transmitter.antenna.height_km
+        medium = self._medium(frequency_hz, mode, 15.0, segment)
+        scan = scan_ranges(
+            medium, start_height_km, MIN_ELEVATION_DEG, MAX_ELEVATION_DEG,
+            self.SCAN_POINTS,
+        )
+        skip = skip_distance_km(
+            medium, start_height_km, MIN_ELEVATION_DEG, MAX_ELEVATION_DEG, scan=scan
+        )
+        self._segment_scans[key] = (medium, scan, skip)
+        return self._segment_scans[key]
+
+    def _hop_ranges(
+        self, media: Sequence[RayMedium], elevation_deg: float
+    ) -> Optional[List[float]]:
+        """Ground range of each hop at one launch elevation, or None.
+
+        One elevation for the whole circuit: a ground reflection preserves
+        it, so every hop leaves at the angle the transmitter chose.  What
+        differs between hops is the ionosphere they climb into, and
+        therefore how far each one reaches.
+        """
+        start_height_km = self.scenario.transmitter.antenna.height_km
+        ranges: List[float] = []
+        for medium in media:
+            values, _, _ = _batch_hop_geometry(
+                medium, np.array([elevation_deg]), start_height_km
+            )
+            if not np.isfinite(values[0]):
+                return None            # one hop escapes: the circuit is broken
+            ranges.append(float(values[0]))
+        return ranges
+
+    def _ground_loss_db(
+        self, elevation_deg: float, frequency_hz: float, hop_ranges: Sequence[float]
+    ) -> float:
+        """Loss at the intermediate ground reflections.
+
+        Each bounce is charged for the surface it actually lands on, not for
+        the path's dominant one.  A North Atlantic circuit reflects off sea
+        water, and a polar one off ice; charging both as average ground is
+        several decibels wrong per bounce in opposite directions.
+        """
+        if len(hop_ranges) <= 1:
             return 0.0
-        ground = self.surface.dominant
         horizontal = self.scenario.transmitter.antenna.antenna_type.value.startswith(
             ("horizontal", "inverted")
         )
-        per_bounce = ground_reflection_loss_db(
-            elevation_deg,
-            frequency_hz,
-            ground,
-            horizontal,
-            self.scenario.weather.effective_moisture_factor,
-            self.scenario.weather.sea_state,
+        total = 0.0
+        travelled = 0.0
+        for span in hop_ranges[:-1]:
+            travelled += span
+            point = destination_point(
+                self.scenario.transmitter.location, self.scenario.bearing_deg, travelled
+            )
+            total += ground_reflection_loss_db(
+                elevation_deg,
+                frequency_hz,
+                classify_surface(point),
+                horizontal,
+                self.scenario.weather.effective_moisture_factor,
+                self.scenario.weather.sea_state,
+            )
+        return total
+
+    def _path_sections(
+        self, distance_km: float
+    ) -> Sequence[Tuple[float, GroundType]]:
+        """The land and sea stretches out to ``distance_km`` along the bearing."""
+        key = round(distance_km, 3)
+        cached = self._sections.get(key)
+        if cached is not None:
+            return cached
+        far = destination_point(
+            self.scenario.transmitter.location, self.scenario.bearing_deg, distance_km
         )
-        return per_bounce * (hops - 1)
+        sections = tuple(
+            path_sections(
+                self.scenario.transmitter.location, far, distance_km,
+                self.scenario.path_samples,
+            )
+        )
+        self._sections[key] = sections
+        return sections
+
+    def _ground_wave(self, frequency_hz: float, distance_km: float) -> "GroundWave":
+        """The surface-wave route to the receiver.
+
+        Always built, never conditioned on distance.  Whether the ground
+        wave matters is what the link budget is for; deciding in advance
+        that "it is a short path so use ground wave, a long one so use
+        skywave" is the kind of rule that answers a 56 km link with a
+        two-hop F2 mode and a 3000 km one with a surface wave.
+        """
+        scenario = self.scenario
+        moisture = scenario.weather.effective_moisture_factor
+        loss = ground_wave_loss_db(
+            distance_km=distance_km,
+            frequency_hz=frequency_hz,
+            sections=self._path_sections(distance_km),
+            moisture_factor=moisture,
+        )
+        tx_gain = scenario.transmitter.antenna.ground_wave_gain_dbi(
+            frequency_hz, scenario.bearing_deg, moisture
+        )
+        rx_gain = scenario.receiver.antenna.ground_wave_gain_dbi(
+            frequency_hz, scenario.reverse_bearing_deg, moisture
+        )
+        noise = noise_budget(
+            frequency_hz=frequency_hz,
+            bandwidth_hz=scenario.receiver.bandwidth_hz,
+            environment=scenario.receiver.noise_environment,
+            sunlit_fraction=self.illumination.sunlit_fraction,
+            geomagnetic_latitude_deg=self.geomagnetic_latitude_deg,
+            kp=scenario.space_weather.kp,
+            rain_rate_mm_h=scenario.weather.rain_rate_mm_h,
+            receiver_noise_figure_db=scenario.receiver.receiver_noise_figure_db,
+        )
+        budget = build_link_budget(
+            frequency_hz=frequency_hz,
+            transmit_power_w=scenario.transmitter.transmit_power_w,
+            transmit_gain_dbi=tx_gain,
+            receive_gain_dbi=rx_gain,
+            # The ground wave follows the surface, so its spreading is over
+            # the great-circle distance itself -- no hop climbs above it and
+            # no ray is longer than the arc.
+            path_length_km=distance_km,
+            absorption_loss_db=0.0,
+            ground_reflection_loss_db=0.0,
+            noise=noise,
+            required_snr_db=scenario.receiver.required_snr_db,
+            hops=0,
+            rain_rate_mm_h=scenario.weather.rain_rate_mm_h,
+            surface_wave_loss_db=loss.total_db,
+        )
+        return GroundWave(
+            frequency_hz=frequency_hz,
+            distance_km=distance_km,
+            loss=loss,
+            budget=budget,
+        )
 
     def _build_mode(
         self,
         frequency_hz: float,
         mode: Mode,
-        hops: int,
         elevation_deg: float,
-        path: RayPath,
+        fractions: Sequence[Tuple[float, float]],
+        paths: Sequence[RayPath],
     ) -> PropagationMode:
-        """Assemble the full budget for one candidate ray."""
+        """Assemble the full budget for one candidate circuit.
+
+        The hops are already traced, each in the ionosphere above its own
+        stretch of the path.  What is left is to charge each one for the
+        absorption where it actually is, and the reflections for the ground
+        they actually land on.
+        """
         scenario = self.scenario
+        hops = len(paths)
         theta = self._theta_rad(elevation_deg)
 
-        absorption = absorption_db(
-            path, self.column, frequency_hz, mode, self.magnetic_field, theta
-        )
-        # Absorption is per hop; the ray repeats.
-        total_absorption_db = absorption.total_db * hops
+        losses = [
+            absorption_db(
+                path, self.column, frequency_hz, mode, self.magnetic_field, theta,
+                fraction_offset=index / hops, fraction_span=1.0 / hops,
+            )
+            for index, path in enumerate(paths)
+        ]
+        absorption = combine_absorption(losses)
+        hop_ranges = [path.ground_range_km for path in paths]
 
         tx_gain = scenario.transmitter.antenna.gain_dbi(
-            elevation_deg,
-            frequency_hz,
-            scenario.bearing_deg,
+            elevation_deg, frequency_hz, scenario.bearing_deg,
             scenario.weather.effective_moisture_factor,
         )
         rx_gain = scenario.receiver.antenna.gain_dbi(
-            elevation_deg,
-            frequency_hz,
-            scenario.reverse_bearing_deg,
+            elevation_deg, frequency_hz, scenario.reverse_bearing_deg,
             scenario.weather.effective_moisture_factor,
         )
 
@@ -354,19 +721,21 @@ class PropagationEngine:
             transmit_power_w=scenario.transmitter.transmit_power_w,
             transmit_gain_dbi=tx_gain,
             receive_gain_dbi=rx_gain,
-            path_length_km=path.geometric_path_km * hops,
-            absorption_loss_db=total_absorption_db,
+            path_length_km=sum(path.geometric_path_km for path in paths),
+            absorption_loss_db=absorption.total_db,
             ground_reflection_loss_db=self._ground_loss_db(
-                elevation_deg, frequency_hz, hops
+                elevation_deg, frequency_hz, hop_ranges
             ),
             noise=noise,
             required_snr_db=scenario.receiver.required_snr_db,
             hops=hops,
             rain_rate_mm_h=scenario.weather.rain_rate_mm_h,
         )
-        return PropagationMode(hops, elevation_deg, mode, path, absorption, budget)
+        return PropagationMode(
+            hops, elevation_deg, mode, paths[0], absorption, budget,
+            tuple(paths), tuple(hop_ranges),
+        )
 
-    # -- main entry points ------------------------------------------------
     #: Elevation samples in the range-against-elevation scan.
     SCAN_POINTS = int((MAX_ELEVATION_DEG - MIN_ELEVATION_DEG) * 2) + 1
 
@@ -393,6 +762,92 @@ class PropagationEngine:
         )
         self._scans[key] = (probe, scan, skip)
         return self._scans[key]
+
+    def _solve_circuit_elevation(
+        self,
+        media: Sequence[RayMedium],
+        target_km: float,
+        low_deg: float,
+        high_deg: float,
+        tolerance_km: float = 1.0,
+        low_total_km: Optional[float] = None,
+        high_total_km: Optional[float] = None,
+    ) -> Optional[float]:
+        """Launch elevation whose hops together cover ``target_km``.
+
+        Solved on the summed ground range of the actual traced hops, not on
+        an interpolation of the scan: the scan locates the bracket, the
+        trace decides the answer.
+
+        By the Illinois variant of false position rather than by bisection.
+        Every iteration costs one traced ray *per hop* -- five of them on a
+        transpacific circuit -- and this is the most expensive loop in the
+        package.  Range against elevation is smooth and monotonic inside a
+        bracket, so interpolating through it converges in a third of the
+        steps; the Illinois halving of the stale endpoint keeps the bracket
+        valid, so it cannot run away from the root the way plain regula
+        falsi can on a one-sided curve.
+        """
+        # The caller found this bracket by summing the cached per-segment
+        # scans, so it already knows both endpoints exactly -- the scans and
+        # this solver trace the same media through the same function.
+        # Re-tracing them here would cost two hops-worth of rays per bracket
+        # to reproduce numbers already in hand.
+        if low_total_km is None:
+            ranges = self._hop_ranges(media, low_deg)
+            if ranges is None:
+                return None
+            low_total_km = sum(ranges)
+        if high_total_km is None:
+            ranges = self._hop_ranges(media, high_deg)
+            if ranges is None:
+                return None
+            high_total_km = sum(ranges)
+        low_error = low_total_km - target_km
+        high_error = high_total_km - target_km
+        if low_error == 0.0:
+            return low_deg
+        if high_error == 0.0:
+            return high_deg
+        if low_error * high_error > 0.0:
+            return None            # the scan's bracket did not survive tracing
+
+        # Best elevation seen, not the last one tried.  A bracket whose
+        # summed range jumps -- one hop of the circuit starts escaping part
+        # way across it -- has no root at all, and iterating to a cap and
+        # then returning the midpoint would hand back an elevation that is
+        # worse than several already visited.  Whatever comes back still
+        # has to survive the traced-range check in :meth:`evaluate`.
+        best_deg, best_error = (
+            (low_deg, low_error) if abs(low_error) <= abs(high_error)
+            else (high_deg, high_error)
+        )
+        for _ in range(32):
+            span = high_error - low_error
+            if span == 0.0:
+                break
+            middle = low_deg - low_error * (high_deg - low_deg) / span
+            # Keep the trial strictly inside the bracket: a flat curve can
+            # otherwise put it on an endpoint and stall.
+            edge = 1e-9 * max(1.0, high_deg - low_deg)
+            middle = min(max(middle, low_deg + edge), high_deg - edge)
+            ranges = self._hop_ranges(media, middle)
+            if ranges is None:
+                return None
+            error = sum(ranges) - target_km
+            if abs(error) < abs(best_error):
+                best_deg, best_error = middle, error
+            if abs(error) <= 0.05 * tolerance_km:
+                return middle
+            if error * low_error < 0.0:
+                high_deg, high_error = middle, error
+                low_error *= 0.5              # Illinois: halve the stale end
+            else:
+                low_deg, low_error = middle, error
+                high_error *= 0.5
+            if high_deg - low_deg < 1e-9:
+                break
+        return best_deg
 
     def max_hop_range_km(self, frequency_hz: float, mode: Mode = Mode.ORDINARY) -> Optional[float]:
         """Longest single hop this frequency can make, or None if none return."""
@@ -427,50 +882,85 @@ class PropagationEngine:
 
         found: List[PropagationMode] = []
         best_skip: Optional[float] = None
-        start_height_km = self.scenario.transmitter.antenna.height_km
-        scan_points = self.SCAN_POINTS
 
         for mode in modes:
-            probe, scan, candidate = self.scan_for(frequency_hz, mode)
+            _, _, candidate = self.scan_for(frequency_hz, mode)
             if candidate is not None:
                 best_skip = candidate if best_skip is None else min(best_skip, candidate)
 
             for hops in range(1, self.scenario.max_hops + 1):
-                target = target_distance / hops
-                if target > math.pi * EARTH_RADIUS_KM:
+                if target_distance / hops > math.pi * EARTH_RADIUS_KM:
                     continue
-                # A target inside the skip zone has no solution by
-                # definition -- the shortest hop this frequency can make is
-                # already longer than the target.  Skipping the search is
-                # free and exact, not an approximation: solve_launch_angles
-                # would scan the same curve and return nothing.
-                if candidate is not None and target < candidate - 1e-9:
+                if target_distance / hops > MAX_HOP_RANGE_KM:
+                    # Geometry alone rules this out, whatever the ionosphere
+                    # does: a ray turning at the very top of the modelled
+                    # profile cannot cover more ground than this in one hop.
+                    # Skipping it here saves tracing an elevation scan per
+                    # hop for a circuit that cannot exist.
                     continue
-                angles = solve_launch_angles(
-                    probe,
-                    target,
-                    start_height_km,
-                    MIN_ELEVATION_DEG,
-                    MAX_ELEVATION_DEG,
-                    scan_points=scan_points,
-                    scan=scan,
-                )
+                fractions = self.segment_fractions(hops)
+                segments = [
+                    self.scan_for_segment(frequency_hz, mode, span)
+                    for span in fractions
+                ]
+                media = [segment[0] for segment in segments]
 
-                for elevation in angles:
-                    medium = self._medium(frequency_hz, mode, elevation)
-                    path = trace_ray(medium, elevation, start_height_km)
-                    if path.escaped:
-                        continue
-                    # Confirm against the re-traced ray: the angle was solved
-                    # on the probe medium, so the landing point is re-checked
-                    # on the medium the budget is actually built from.
-                    if abs(path.ground_range_km - target) > max(5.0, 0.01 * target):
-                        continue
-                    found.append(
-                        self._build_mode(frequency_hz, mode, hops, elevation, path)
+                # The whole circuit leaves at one elevation, so the total
+                # ground range is the sum of what each hop reaches in its own
+                # ionosphere.  Summing the cached per-segment scans gives that
+                # curve for every candidate elevation at once; only the few
+                # elevations that bracket the target are then traced properly.
+                elevations = segments[0][1][0]
+                per_segment = [segment[1][1] for segment in segments]
+                totals: List[Optional[float]] = []
+                for index in range(len(elevations)):
+                    values = [ranges[index] for ranges in per_segment]
+                    totals.append(
+                        None if any(v is None for v in values) else sum(values)
                     )
 
-        report = FrequencyReport(frequency_hz, tuple(found), best_skip)
+                for index in range(len(elevations) - 1):
+                    low_total, high_total = totals[index], totals[index + 1]
+                    if low_total is None or high_total is None:
+                        continue
+                    if (low_total - target_distance) * (high_total - target_distance) > 0.0:
+                        continue
+
+                    elevation = self._solve_circuit_elevation(
+                        media, target_distance,
+                        float(elevations[index]), float(elevations[index + 1]),
+                        low_total_km=low_total, high_total_km=high_total,
+                    )
+                    if elevation is None:
+                        continue
+                    if any(abs(elevation - m.launch_elevation_deg) < 1e-3
+                           for m in found if m.hops == hops and m.mode is mode):
+                        continue
+
+                    start_height_km = self.scenario.transmitter.antenna.height_km
+                    paths = []
+                    for span in fractions:
+                        medium = self._medium(frequency_hz, mode, elevation, span)
+                        path = trace_ray(medium, elevation, start_height_km)
+                        if path.escaped:
+                            paths = []
+                            break
+                        paths.append(path)
+                    if not paths:
+                        continue
+                    # Accept only because the traced circuit really lands on
+                    # the receiver, never because the solver said it would.
+                    reached = sum(path.ground_range_km for path in paths)
+                    if abs(reached - target_distance) > max(5.0, 0.01 * target_distance):
+                        continue
+                    found.append(
+                        self._build_mode(frequency_hz, mode, elevation, fractions, paths)
+                    )
+
+        report = FrequencyReport(
+            frequency_hz, tuple(found), best_skip,
+            self._ground_wave(frequency_hz, target_distance),
+        )
         self._reports[key] = report
         return report
 
@@ -730,10 +1220,42 @@ class Prediction:
             })
         return sorted(rows, key=lambda r: r["score"], reverse=True)
 
+    def ground_wave_report(self) -> List[dict]:
+        """The surface route on each standard band.
+
+        Reported next to the band scores rather than mixed into them: the
+        two are different routes with different antennas, different
+        polarisation and different reasons to fail, and a table that
+        averaged them would be describing a link that does not exist.
+        """
+        rows = []
+        for name, centre_mhz in STANDARD_BANDS_MHZ:
+            nearest = min(
+                self.reports, key=lambda r: abs(r.frequency_mhz - centre_mhz)
+            )
+            if abs(nearest.frequency_mhz - centre_mhz) > 0.5:
+                continue
+            wave = nearest.ground_wave
+            if wave is None:
+                continue
+            rows.append({
+                "band": name,
+                "frequency_mhz": centre_mhz,
+                "margin_db": wave.margin_db,
+                "snr_db": wave.budget.snr_db,
+                "excess_loss_db": wave.loss.total_db,
+                "surface_loss_db": wave.loss.surface_db,
+                "curvature_loss_db": wave.loss.curvature_db,
+                "sea_fraction": wave.loss.sea_fraction,
+                "usable": wave.margin_db >= 0.0,
+            })
+        return rows
+
     def summary(self) -> dict:
         best = self.best_report()
         return {
             "scenario": self.scenario.summary(),
+            "ground_wave": self.ground_wave_report(),
             "conditions": self.conditions,
             "muf_mhz": self.muf_mhz,
             "lof_mhz": self.lof_mhz,

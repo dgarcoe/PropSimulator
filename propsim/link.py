@@ -3,6 +3,12 @@
 The chain is the Friis equation with the ionosphere's losses inserted:
 
     Prx = Ptx + Gtx + Grx - Lspread - Labsorption - Lground - Lweather
+                                     - Lsurface
+
+A skywave mode pays ``Labsorption`` and ``Lground`` and nothing for
+``Lsurface``; a ground wave pays ``Lsurface`` and nothing for the other
+two.  They are alternative routes between the same two stations, and
+the budget of one is never a term in the budget of the other.
 
 ``Lspread`` is free-space spreading over the **ray's own path length**, not
 over the ground range: a 2000 km hop that climbs to 300 km travels further
@@ -93,6 +99,11 @@ class LinkBudget:
     required_snr_db: float
     path_length_km: float
     hops: int
+    #: Excess loss of a ground wave over free space -- surface dissipation
+    #: plus earth curvature.  Zero for every skywave mode, which pays for
+    #: the ionosphere instead; the two are alternative routes, never terms
+    #: of one another's budget.
+    surface_wave_loss_db: float = 0.0
 
     @property
     def snr_db(self) -> float:
@@ -109,6 +120,7 @@ class LinkBudget:
             + self.absorption_loss_db
             + self.ground_reflection_loss_db
             + self.rain_attenuation_db
+            + self.surface_wave_loss_db
         )
 
     def verify(self) -> None:
@@ -136,6 +148,7 @@ class LinkBudget:
             "absorption_loss_db": -self.absorption_loss_db,
             "ground_reflection_loss_db": -self.ground_reflection_loss_db,
             "rain_attenuation_db": -self.rain_attenuation_db,
+            "surface_wave_loss_db": -self.surface_wave_loss_db,
             "received_power_dbw": self.received_power_dbw,
             "noise_power_dbw": self.noise.noise_power_dbw,
             "snr_db": self.snr_db,
@@ -156,6 +169,7 @@ def build_link_budget(
     required_snr_db: float,
     hops: int = 1,
     rain_rate_mm_h: float = 0.0,
+    surface_wave_loss_db: float = 0.0,
 ) -> LinkBudget:
     """Assemble and self-check a link budget."""
     if transmit_power_w <= 0.0:
@@ -173,6 +187,7 @@ def build_link_budget(
         - absorption_loss_db
         - ground_reflection_loss_db
         - rain            # subtracted, not merely displayed
+        - surface_wave_loss_db
     )
 
     budget = LinkBudget(
@@ -189,6 +204,7 @@ def build_link_budget(
         required_snr_db=required_snr_db,
         path_length_km=path_length_km,
         hops=hops,
+        surface_wave_loss_db=surface_wave_loss_db,
     )
     budget.verify()
     return budget

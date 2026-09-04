@@ -19,17 +19,18 @@ from __future__ import annotations
 
 import math
 from bisect import bisect_left
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Sequence
 
+from .atmosphere import collision_frequency as atmosphere_collision_frequency
 from .constants import PLASMA_FREQ_COEFF_HZ
 from .geodesy import GeoPoint, path_points
 from .magnetic import geomagnetic_latitude_deg
 from .solar import solar_zenith_angle_deg
 from .spaceweather import QUIET_XRAY_FLUX, SpaceWeather
 
-__all__ = ["Layer", "LayerSet", "IonosphericProfile", "build_profile",
+__all__ = ["Layer", "DRegionLayer", "LayerSet", "IonosphericProfile", "build_profile",
            "EquivalentColumn", "build_equivalent_column",
            "plasma_frequency_hz", "plasma_frequency_mhz",
            "electron_density_from_plasma_frequency", "collision_frequency_hz"]
@@ -64,27 +65,13 @@ def electron_density_from_plasma_frequency(frequency_hz: float) -> float:
     return (frequency_hz / PLASMA_FREQ_COEFF_HZ) ** 2
 
 
-#: Quadratic-in-log fit to the electron-neutral collision frequency,
-#: log10(nu) = A + B h + C h^2, anchored on the standard values
-#: 1.5e7 s^-1 at 60 km, 8e5 at 90 km and 1e4 at 120 km.  A single
-#: exponential cannot span that range: the neutral scale height falls from
-#: about 10 km in the D region to under 6 km at the base of the E region,
-#: and forcing one exponent through both leaves the collision frequency
-#: several times too high at E-layer heights -- which shows up directly as
-#: too much absorption for every ray that grazes the E layer.
-#: Least-squares fit over all seven reference heights (60-120 km) rather
-#: than an exact fit through three of them.  The reference values are not
-#: perfectly smooth -- they imply a factor of ten between 100 and 110 km and
-#: only three between 110 and 120 -- so no quadratic reproduces them all;
-#: the worst deviation is 1.55x, at 110 km.  That residual is documented
-#: rather than absorbed into a tuning constant.
-_NU_A, _NU_B, _NU_C = 7.54528, 1.710708e-2, -3.933216e-4
-
-
 def collision_frequency_hz(height_km: float) -> float:
-    """Electron-neutral collision frequency, s^-1."""
-    log_nu = _NU_A + _NU_B * height_km + _NU_C * height_km**2
-    return 10.0**log_nu
+    """Electron-neutral collision frequency, s^-1.
+
+    Delegates to :mod:`propsim.atmosphere`, where it is derived from Banks'
+    relation and the US Standard Atmosphere rather than fitted to a table.
+    """
+    return atmosphere_collision_frequency(height_km)
 
 
 # --------------------------------------------------------------------------
@@ -134,10 +121,97 @@ class Layer:
 
 
 @dataclass(frozen=True)
+class DRegionLayer:
+    """The D region, which is not a Chapman layer and should not be one.
+
+    A Chapman layer has a production peak with a roughly symmetric shape
+    about it.  The D region does not: its electron density climbs by two
+    orders of magnitude between 70 and 90 km and then merges into the E
+    layer without ever peaking on its own.  Forcing a Chapman shape on it
+    produces a profile that is nearly flat across 70-90 km -- fourteen times
+    too low at 85 km against published values -- and since that is exactly
+    the band where the product of electron density and collision frequency
+    is largest, it moves absorption out of the D region and into the E,
+    which is the wrong region to be dominated by.
+
+    The shape here is two terms fitted to the published daytime profile:
+
+    * a ledge near 60-70 km, produced by cosmic rays and Lyman-alpha on
+      nitric oxide, which survives the night at a reduced level;
+    * an exponential rise with a 4.3 km scale height anchored at 90 km,
+      which carries the daytime absorption.
+
+    Both are empirical.  What matters is that they follow the measured
+    shape rather than a shape borrowed from a different physical regime.
+    """
+
+    name: str
+    #: Electron density at 90 km, the anchor of the rising term, m^-3.
+    density_at_90km: float
+    #: Density of the lower ledge at its centre, m^-3.
+    ledge_density: float
+    chi_deg: float
+    #: Peak density of the flare component, m^-3.  Zero on a quiet sun.
+    flare_density: float = 0.0
+
+    #: Scale height of the rise, km.  Fitted to 1e8 at 70 km and 1e10 at 90.
+    RISE_SCALE_KM = 4.3
+    #: Centre and width of the lower ledge, km.
+    LEDGE_CENTRE_KM = 62.0
+    LEDGE_WIDTH_KM = 12.0
+    #: Above this the E layer takes over; the D term is rolled off so the
+    #: two are not both counted in the same kilometres.
+    TAPER_HEIGHT_KM = 90.0
+    TAPER_SCALE_KM = 3.0
+    #: Centre and width of the flare component, km.  Hard X-rays penetrate
+    #: deeper than Lyman-alpha, so a flare adds electrons around 75 km --
+    #: below where the quiet D region lives, and where the collision
+    #: frequency is an order of magnitude higher.  That is why a flare
+    #: blacks out HF: the new electrons are exactly where they absorb most.
+    FLARE_CENTRE_KM = 75.0
+    FLARE_WIDTH_KM = 9.0
+
+    @property
+    def peak_density(self) -> float:
+        return self.density_at_90km
+
+    @property
+    def peak_height_km(self) -> float:
+        return self.TAPER_HEIGHT_KM
+
+    @property
+    def scale_height_km(self) -> float:
+        return self.RISE_SCALE_KM
+
+    @property
+    def critical_frequency_mhz(self) -> float:
+        return plasma_frequency_mhz(self.peak_density)
+
+    def density_at(self, height_km: float) -> float:
+        if height_km < 45.0 or height_km > 130.0:
+            return 0.0
+        if height_km <= self.TAPER_HEIGHT_KM:
+            rise = self.density_at_90km * math.exp(
+                (height_km - self.TAPER_HEIGHT_KM) / self.RISE_SCALE_KM
+            )
+        else:
+            rise = self.density_at_90km * math.exp(
+                -(height_km - self.TAPER_HEIGHT_KM) / self.TAPER_SCALE_KM
+            )
+        ledge = self.ledge_density * math.exp(
+            -(((height_km - self.LEDGE_CENTRE_KM) / self.LEDGE_WIDTH_KM) ** 2)
+        )
+        flare = self.flare_density * math.exp(
+            -(((height_km - self.FLARE_CENTRE_KM) / self.FLARE_WIDTH_KM) ** 2)
+        )
+        return rise + ledge + flare
+
+
+@dataclass(frozen=True)
 class LayerSet:
     """The four layers at one geographic point and time."""
 
-    d: Layer
+    d: DRegionLayer
     e: Layer
     f1: Layer
     f2: Layer
@@ -155,6 +229,26 @@ def _solar_scaling(f107: float, sunspot_number: float) -> float:
     flux_term = (f107 / 100.0) ** 0.6
     sunspot_term = (1.0 + sunspot_number / 250.0) ** 0.35
     return flux_term * sunspot_term
+
+
+def _d_region_illumination(zenith_deg: float) -> float:
+    """Solar control of D-region ionisation.
+
+    Simple Chapman photochemistry gives ``Ne ~ sqrt(q) ~ sqrt(cos chi)``,
+    since production is proportional to the cosine and loss is quadratic in
+    the electron density.  Observed D-region absorption falls off more
+    steeply than that, because the effective recombination coefficient is
+    not constant: as the sun drops, negative-ion chemistry takes over and
+    electrons are lost faster, so the density falls below what a fixed alpha
+    would predict.  An exponent of 0.75 rather than 0.5 carries that.
+
+    It is still shallower than the 0.881 the empirical absorption index
+    uses, and the remaining gap is recorded in docs/MODEL.md rather than
+    closed by fitting.
+    """
+    if zenith_deg < 90.0:
+        return max(0.0, math.cos(math.radians(zenith_deg))) ** 0.75
+    return 0.03 * math.exp(-(zenith_deg - 90.0) / 6.0)
 
 
 def _chapman_illumination(zenith_deg: float) -> float:
@@ -203,15 +297,44 @@ def build_layers(
     # empirical flare factor on top of it.
     xray_ratio = weather.xray_flux_wm2 / QUIET_XRAY_FLUX
     xray_enhancement = xray_ratio ** 0.5   # Ne ~ sqrt(q) in the recombining D
-    d_density = 2.5e8 * solar * illumination * xray_enhancement
 
     # Auroral particle precipitation ionises the D region independently of
     # the Sun, which is why absorption survives the night at high latitude.
     auroral = 1.0 + 2.2 * (weather.kp / 9.0) ** 2 * math.exp(
         -((abs(mag_lat) - 67.0) / 11.0) ** 2
     )
-    d_density *= auroral
-    d_layer = Layer("D", max(d_density, 0.0), 75.0, 5.0, zenith)
+
+    d_illumination = _d_region_illumination(zenith)
+
+    # 1e10 m^-3 at 90 km is the published quiet daytime value for an
+    # overhead sun; illumination and solar activity scale it from there.
+    # Around 90 km the ionisation is driven by Lyman-alpha, and Lyman-alpha
+    # barely moves in a flare -- it is the X-ray band that spikes by orders
+    # of magnitude.  So the enhancement here is slight: an exponent of 0.05
+    # lifts an X1 by half again, against the six-fold rise at 75 km where
+    # the X-rays actually deposit.  Applying the full square
+    # root here put an X-class flare's D region above the F2 peak, which no
+    # flare does, and made a C-class flare -- which does not disturb HF at
+    # all -- read as a total blackout.
+    d_at_90km = 1.0e10 * solar * d_illumination * xray_ratio**0.05 * auroral
+
+    # The lower ledge is largely cosmic-ray produced, so it survives the
+    # night at a quarter of its daytime value.  Cosmic rays do not care
+    # about a solar flare, so no X-ray term belongs here.
+    d_ledge = 1.0e8 * solar * (0.25 + 0.75 * d_illumination) * auroral
+
+    # The flare component: hard X-rays penetrate deeper than Lyman-alpha and
+    # deposit around 75 km -- below the quiet D region, and where the
+    # collision frequency is an order of magnitude higher.  That is why a
+    # flare blacks out HF: the new electrons land exactly where they absorb
+    # most.  The amplitude is set so a quiet sun contributes 1e7 m^-3 there,
+    # an order below the ledge and therefore inert, while an X1 reaches
+    # 1e9, the observed flare-time value.
+    d_flare = 2.5e7 * solar * d_illumination * auroral * xray_enhancement
+
+    d_layer = DRegionLayer(
+        "D", max(d_at_90km, 0.0), max(d_ledge, 0.0), zenith, max(d_flare, 0.0)
+    )
 
     # ---- E region ------------------------------------------------------
     # The classical empirical relation, rather than a parameterisation of
@@ -424,6 +547,57 @@ class EquivalentColumn:
     mean_profile: IonosphericProfile
     profiles: Sequence[IonosphericProfile]
     fractions: Sequence[float]
+    #: Memo for :meth:`segment_profile`.  Mutating the dict is allowed on a
+    #: frozen dataclass because the field itself is never rebound.
+    _segments: dict = field(default_factory=dict, compare=False, repr=False)
+
+    def segment_profile(
+        self, low_fraction: float, high_fraction: float
+    ) -> IonosphericProfile:
+        """Average the ionosphere over one stretch of the path.
+
+        A hop traverses a fraction of the circuit, so the column it should
+        be traced through is the average over *that* stretch, not the
+        average over the whole path and not the single profile at its
+        midpoint.  For a one-hop circuit the stretch is the whole path and
+        this reduces exactly to :attr:`mean_profile`, which is the case the
+        equivalent-column approximation was built for.
+        """
+        low = min(max(low_fraction, 0.0), 1.0)
+        high = min(max(high_fraction, 0.0), 1.0)
+        if high < low:
+            low, high = high, low
+        key = (round(low, 4), round(high, 4))
+        cached = self._segments.get(key)
+        if cached is not None:
+            return cached
+
+        chosen = [
+            profile
+            for profile, fraction in zip(self.profiles, self.fractions)
+            if low - 1e-9 <= fraction <= high + 1e-9
+        ]
+        if not chosen:
+            chosen = [self.profile_at_fraction(0.5 * (low + high))]
+        if len(chosen) == 1:
+            self._segments[key] = chosen[0]
+            return chosen[0]
+
+        heights = chosen[0].heights_km
+        densities = [
+            sum(profile.densities[i] for profile in chosen) / len(chosen)
+            for i in range(len(heights))
+        ]
+        middle = chosen[len(chosen) // 2]
+        profile = IonosphericProfile(
+            heights_km=heights,
+            densities=densities,
+            layers=middle.layers,
+            point=middle.point,
+            solar_zenith_deg=middle.solar_zenith_deg,
+        )
+        self._segments[key] = profile
+        return profile
 
     def profile_at_fraction(self, fraction: float) -> IonosphericProfile:
         """Local profile at a fraction of the way along the path."""

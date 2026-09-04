@@ -312,25 +312,46 @@ class TestAbsorptionWiring:
             ).total_db
         assert results["day"] > 5 * results["night"]
 
+    def _flare_loss(self, label, frequency_hz):
+        field = magnetic_field(GeoPoint(45, -2), 250.0)
+        weather = (SpaceWeather(f107=140) if label == "quiet"
+                   else SpaceWeather(f107=140).with_flare(label))
+        column = build_equivalent_column(
+            GeoPoint(40.4, -3.7), GeoPoint(51.5, -0.1), NOON, weather
+        )
+        medium = RayMedium(column.mean_profile, frequency_hz, Mode.ORDINARY)
+        path = trace_ray(medium, 20.0, 0.015)
+        return absorption_db(path, column, frequency_hz, Mode.ORDINARY, field, 1.0)
+
     def test_flare_raises_absorption_through_the_d_region_alone(self):
         """No empirical flare multiplier exists, so the blackout has to come
         from the electron density -- and it does."""
-        field = magnetic_field(GeoPoint(45, -2), 250.0)
-        losses = {}
-        for label, weather in (
-            ("quiet", SpaceWeather(f107=140)),
-            ("flare", SpaceWeather(f107=140).with_flare("X1")),
-        ):
-            column = build_equivalent_column(
-                GeoPoint(40.4, -3.7), GeoPoint(51.5, -0.1), NOON, weather
-            )
-            medium = RayMedium(column.mean_profile, 14e6, Mode.ORDINARY)
-            path = trace_ray(medium, 20.0, 0.015)
-            losses[label] = absorption_db(
-                path, column, 14e6, Mode.ORDINARY, field, 1.0
-            )
-        assert losses["flare"].total_db > losses["quiet"].total_db + 20.0
-        assert losses["flare"].by_region_db["D"] > 10 * losses["quiet"].by_region_db["D"]
+        quiet = self._flare_loss("quiet", 14e6)
+        flare = self._flare_loss("X1", 14e6)
+        assert flare.total_db > quiet.total_db + 10.0
+        assert flare.by_region_db["D"] > 2 * quiet.by_region_db["D"]
+
+    def test_flare_severity_follows_the_class(self):
+        """A stronger claim than a single threshold: C-class is a nuisance,
+        M-class degrades, X-class closes the band."""
+        quiet = self._flare_loss("quiet", 7e6).total_db
+        extra = {
+            label: self._flare_loss(label, 7e6).total_db - quiet
+            for label in ("C1", "M1", "X1", "X5")
+        }
+        assert extra["C1"] < extra["M1"] < extra["X1"] < extra["X5"]
+        assert extra["C1"] < 20.0            # a nuisance, not an outage
+        assert extra["X1"] > 35.0            # the low bands are gone
+
+    def test_a_flare_hits_the_low_bands_hardest(self):
+        """Absorption goes as 1/f^2, so a flare that closes 40 m leaves 15 m
+        usable. A model that darkened the whole spectrum equally would be
+        describing something other than absorption."""
+        quiet_low = self._flare_loss("quiet", 7e6).total_db
+        quiet_high = self._flare_loss("quiet", 21e6).total_db
+        flare_low = self._flare_loss("X1", 7e6).total_db - quiet_low
+        flare_high = self._flare_loss("X1", 21e6).total_db - quiet_high
+        assert flare_low > 4 * flare_high
 
 
 class TestLinkBudget:

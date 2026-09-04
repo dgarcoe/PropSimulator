@@ -339,11 +339,15 @@ def _batch_apex_radii(
     low = candidates[first[active] - 1].astype(float)
     high = candidates[first[active]].astype(float)
     p_active = bouguer[active]
-    # A bracket is at most one profile-grid segment wide, so ~35 halvings
-    # reach the 1e-9 km tolerance; the loop leaves as soon as it does rather
-    # than grinding out a fixed count for precision nothing can use.
+    # A bracket is at most one profile-grid segment wide -- two kilometres --
+    # so ~21 halvings reach a millimetre, and the loop leaves as soon as it
+    # does rather than grinding out a fixed count.  A millimetre is already
+    # eleven orders of magnitude below the hop it belongs to and eight below
+    # the grid the profile is sampled on: refining it further costs a third
+    # of the tracer's running time and buys precision nothing downstream can
+    # represent, let alone use.
     for _ in range(50):
-        if np.all(high - low < 1e-9):
+        if np.all(high - low < 1e-6):
             break
         mid = 0.5 * (low + high)
         g_mid = medium.n_squared_at_radius(mid) * mid**2 - p_active**2

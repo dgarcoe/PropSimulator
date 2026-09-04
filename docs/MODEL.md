@@ -12,7 +12,7 @@ a factor; a derived relation is either right or a bug.
 | Space-weather drivers | NOAA SWPC or manual, range-validated | data |
 | Path geometry | great circles on a sphere | derived |
 | Solar position | low-precision almanac series from J2000 | derived, <0.01° |
-| Ionospheric layers | alpha-Chapman D/E/F1/F2 | Chapman shape derived; E from the classical foE relation, D/F1/F2 **empirical** |
+| Ionospheric layers | alpha-Chapman E/F1/F2, exponential-plus-ledge D | Chapman shape derived; E from the classical foE relation, D/F1/F2 **empirical** |
 | Refractive index | Appleton–Hartree, collisionless, both modes evaluated | derived, exact |
 | Sporadic E | Gaussian patch + occurrence climatology | **empirical**, entered as a probability |
 | Day-to-day spread | log-normal foF2 about the median | **empirical decile factors** |
@@ -20,7 +20,8 @@ a factor; a derived relation is either right or a bug.
 | Magnetic field | tilted dipole aligned to IGRF-2025 | approximation |
 | Ray path | Bouguer invariant / Snell / Fermat | derived, exact |
 | Turning point | bisection with `r = r_apex − w²` regularisation | derived, exact |
-| Absorption | non-deviative, electron–neutral collisions | derived form, **empirical ν(h)** |
+| Absorption | non-deviative, electron–neutral collisions | derived form; ν(h) from Banks over the US Standard Atmosphere |
+| Ground wave | Sommerfeld attenuation + Fock shadow + Millington | derived, exact where stated below |
 | Antenna | image theory + Fresnel ground | derived |
 | Noise | thermal + galactic + atmospheric + man-made + auroral | **empirical**, P.372-shaped |
 | Link budget | Friis with ionospheric losses | derived |
@@ -42,9 +43,16 @@ Other externally anchored checks:
   textbook values
 - Appleton–Hartree cutoffs land at `X = 1` (O) and `X = 1 − Y` (X) exactly,
   and are independent of the field/ray angle, as theory requires
+- the Sommerfeld ground-wave attenuation function, computed from a
+  Faddeeva function the package builds itself out of numpy, agrees with
+  SciPy's to better than 10⁻⁶ dB across every HF band, every ground
+  constant and 1–800 km
+- a short vertical monopole over ground comes out at 4.77 dBi, which is the
+  300 mV/m at 1 km per kilowatt every ground-wave chart is drawn against —
+  derived from image theory, not entered
 - horizontal-dipole main lobe at `sin θ = λ/4h` within 1.5°
 - atmospheric noise within 3 dB of the ITU-R P.372 mid-latitude curves
-- F-region absorption within 7% of an independent absorption index (mean over
+- F-region absorption within 6% of an independent absorption index (mean over
   12–20 MHz), and foE equal to the classical relation by construction
 - every vectorised fast path is asserted bit-identical to the plain one it
   replaced: the batch ray tracer against the single-ray tracer, and the
@@ -70,35 +78,151 @@ which is an established empirical expression rather than one of our own.
 A 9.9% error in foE is 21% in density, and the E region dominates the
 absorption integral for any ray that crosses it.
 
-**After that fix, F-region absorption agrees with the reference to within
-7% on average** (individual ratios 0.84–1.07 over 12–20 MHz). The
-comparison is restricted to F modes deliberately: the reference describes a
-ray that *crosses* the absorbing layer, and a ray that turns below 110 km is
-a different physical situation, not a disagreement.
+**F-region absorption now agrees with the reference to within 6% on
+average** (mean ratio 0.94, individual ratios 0.92–0.98 over 12–20 MHz).
+The comparison is restricted to F modes deliberately: the reference
+describes a ray that *crosses* the absorbing layer, and a ray that turns
+below 110 km is a different physical situation, not a disagreement.
+
+### Where the loss is charged, and why that changed
+
+Getting the total right is not the same as getting the physics right, and
+for a while this model had the first without the second. It attributed
+about 5% of the loss to the D region and 93% to the E region — a split that
+is backwards. Two things were wrong beneath it:
+
+- **The D-layer profile was a Chapman layer.** The real D region is not
+  one. Its density climbs roughly exponentially with a scale height of a
+  few kilometres, with a ledge near 60 km where the chemistry changes and a
+  flare-driven enhancement around 75 km. The model was 14× too low at 85 km
+  and *flat* over the stretch where the real profile rises two orders of
+  magnitude. `DRegionLayer` replaces it with the exponential-plus-ledge
+  form and now matches published daytime densities to about 2×.
+- **The collision frequency was a remembered table.** It implied a factor
+  of ten between 100 and 110 km and only three over the next ten
+  kilometres, which no smooth atmosphere does. `propsim/atmosphere.py`
+  derives ν(h) instead, from Banks' relation `ν = 5.4e-16 n √T` over the US
+  Standard Atmosphere — one interpolation of two tabulated atmospheric
+  quantities rather than a curve remembered from a figure.
+
+The split is now roughly **50% D, 47% E** across 12–20 MHz, which is the
+right order, and the total moved from 0.93 to 0.94 of the reference in the
+process — the corrections were to *where* the loss is, not to how much.
 
 ### What still differs, and why
 
 | scaling | core | reference |
 |---|---|---|
-| frequency | −2.45 | −1.68 |
-| obliquity (sec i) | +1.28 | +1.00 |
-| solar zenith (cos χ) | **+0.47** | **+0.88** |
+| frequency | −1.99 | −1.68 |
+| obliquity (sec i) | +1.15 | +1.00 |
+| solar zenith (cos χ) | **+0.62** | **+0.88** |
 
-The frequency and obliquity exponents are close, and the core's are the more
-physical of the two: non-deviative absorption goes as 1/f² exactly, steepened
-a little because a higher frequency also turns higher, and the reference is
-linear in sec *i* only because it is written that way.
+The frequency and obliquity exponents are close, and the core's are the
+more physical of the two: non-deviative absorption goes as 1/f² exactly —
+which is what −1.99 says — and the reference is linear in sec *i* only
+because it is written that way.
 
-The zenith exponent is a genuine structural difference. The core attributes
-most of the loss to the E region, whose density follows cos^0.5 χ through the
-foE relation; the reference attributes it to the D region, with its cos^0.881
-χ law. At large zenith angles (χ > 70°) the core therefore absorbs up to 1.8×
-more than the reference.
+The zenith exponent is a genuine residual difference: +0.62 against +0.88,
+so at large zenith angles (χ > 70°) the core absorbs somewhat more than the
+reference. It closed from +0.47 as a *consequence* of fixing the D-region
+profile, which is the right way for it to move — nothing was fitted to it.
+The gap that remains is recorded rather than tuned away, because matching
+an exponent by scaling constants hides which region is being modelled
+wrongly instead of showing it.
 
-So: the **total** is cross-validated; the **split between D and E** is not,
-and the discrepancy shows up near sunrise and sunset. This is recorded rather
-than tuned away, because matching the exponent by scaling constants would
-hide which region is actually being modelled wrongly.
+## The ground wave
+
+Every other part of this package models skywave. Below the skip distance
+there is no skywave, and a skywave-only model answers a 56 km link on 80
+metres with "no path" — which is not a conservative answer but a wrong one.
+`propsim/groundwave.py` fills that hole, and three things go into it.
+
+**Surface dissipation.** Sommerfeld's flat-earth attenuation function
+`A(p)`, evaluated rather than fitted. The usual rational approximations
+(Norton's, Terman's) are good to about a decibel over sea water and average
+ground, and drift to 4.6 dB over fresh water, where the numerical distance
+turns nearly pure imaginary and the fit's phase-correction term overshoots.
+The exact function needs the Faddeeva function `w(z)`, which the core
+builds itself: Weideman's rational approximation, whose coefficients are
+computed at import by an FFT rather than transcribed from a table. It
+agrees with SciPy's to one part in 10¹³, and the whole attenuation function
+to better than 10⁻⁶ dB.
+
+The evaluation is arranged so nothing large cancels. Written directly,
+`A(p) = 1 − j√(πp)·exp(−p)·erfc(j√p)` subtracts two enormous nearly equal
+numbers over any lossy ground; using `w(−z) = 2exp(−z²) − w(z)` collapses
+the bracket to a single `w(−√p)`, and since `arg p` always lies in
+(−90°, 0°), `−√p` always lands in the upper half plane where `w` is bounded.
+
+**Earth curvature.** Beyond the horizon the surface falls away from the
+wavefront. The leading term of the Fock residue series supplies the shadow,
+and it is joined to the flat-earth result **without a seam**: a
+single-residue expansion exceeds unity at small normalised distance and
+falls below it beyond, so the crossing is where the shadow begins. That
+crossing is solved for (x ≈ 1.72, which at 3.65 MHz is 213 km — comfortably
+outside the geometric horizon) rather than chosen, and the curvature factor
+is therefore continuous at 1.0 by construction.
+
+This term is evaluated in the **good-conductor limit** of the residue
+series (the boundary condition `w'(t) = 0`, leading root
+`1.01879 exp(iπ/3)`). That is close to right over sea water, which is where
+a ground wave travels far enough for curvature to matter. Over land the
+true root moves and the shadow decays up to 2.3× faster — but over land the
+flat-earth term has already spent 50 dB before the horizon, so the path is
+dead long before the difference could show. The model is accurate where the
+ground wave lives and optimistic where it does not, by a factor named here
+rather than hidden.
+
+**Mixed land and sea.** Millington's method, over the same coastline
+polygons the globe is drawn from. A sea path that ends with 200 km of land
+is not the same link as one that starts with it, and averaging the ground
+constants along the path loses that asymmetry completely. Millington's
+forward-and-reverse mean restores reciprocity — which a passive path must
+have — and a path of one ground reduces to the homogeneous answer exactly,
+independently of how finely it was sampled.
+
+**Polarisation and height** live on the antenna, not the path. The ground
+wave is vertically polarised; its front tilts forward by the surface
+impedance Δ, and that tilt is the only horizontal electric field there is,
+so a horizontal antenna couples down by |Δ| — about 15 dB over average
+ground and 44 dB over sea. That is an upper bound, since it assumes the
+wire has a component in the plane of propagation. The field also varies as
+`1 + jkhΔ` in the first tens of metres, which at HF over sea is nothing at
+all — the reason ground-wave coverage is famously indifferent to antenna
+height.
+
+Note that this is emphatically **not** `gain_dbi(0°)`. Both Fresnel
+coefficients tend to −1 at grazing, so the direct ray and its image cancel
+and the over-ground pattern collapses to a 60 dB null for every antenna
+ever built. The space wave really does vanish along the surface; what
+survives is a different field with a different excitation, and reading the
+null as its gain would delete the ground wave from the model entirely.
+
+### How the two routes are kept apart
+
+The ground wave is **not** a `PropagationMode`. It has no launch angle, no
+hop count, no apex, no magnetoionic splitting and no ionospheric
+absorption, and a class carrying all of those as zeros would invite
+counting it as a hop.
+
+It is also deliberately kept out of `FrequencyReport.modes`, because a
+ground wave exists at *every* frequency: if it counted towards "open", the
+MUF would pin itself to the top of the search range for every path on
+earth. `is_open` therefore remains a statement about what the ionosphere
+returns, which is what a MUF is defined by, and `usable` — any route
+clearing the operator's own required SNR — is the question an operator
+actually has. Coverage curves report the two in separate columns for the
+same reason: merging them would fill in the skip zone the chart exists to
+show.
+
+The two do interfere where both arrive. The ground wave is the early
+arrival — along the surface at *c*, under the ionosphere at more than *c* —
+and the beat between them is the classic dusk fade on 160 and 80 metres, so
+it enters the multipath sum alongside the skywave modes. Arrivals more than
+40 dB below the strongest are dropped from that sum: at that ratio the
+resultant swings by at most 0.086 dB between full addition and full
+cancellation, so counting them would inflate the reported mode count
+without moving any number that depends on it.
 
 ## The coastlines
 
@@ -118,12 +242,26 @@ cannot be crossed by a ray-casting test.
 
 - **Spherical Earth, not WGS-84.** The path-length error is a few parts per
   thousand, three orders of magnitude below the ionospheric uncertainty.
-- **Equivalent column.** Nine profiles along the great circle are averaged
-  at each height, and the ray is traced through that single column. This is
-  what makes a radially symmetric solver applicable to a varying ionosphere.
-  Absorption escapes the averaging: it reads the *local* profile beneath
-  each ray node, so a path crossing the terminator absorbs like a half-lit
-  path.
+- **Equivalent column, per hop.** Nine profiles along the great circle are
+  averaged at each height, which is what makes a radially symmetric solver
+  applicable to a varying ionosphere. But each hop of a multi-hop circuit
+  is traced through the ionosphere averaged over **its own stretch** of the
+  path, not over the whole of it: on Madrid–Tokyo at 22% sunlit, foF2 runs
+  from 8.3 MHz at the near end to 6.0 MHz at the far one, and tracing every
+  hop through the 6.5 MHz average describes neither end. The hops of one
+  circuit therefore reach different distances, and the circuit's launch
+  angle is solved on their *sum*. A one-hop circuit reduces exactly to the
+  whole-path average, so nothing is paid for the machinery when there is
+  no gradient to resolve.
+  Absorption escapes the averaging entirely: it reads the *local* profile
+  beneath each ray node, so a path crossing the terminator absorbs like a
+  half-lit path.
+- **Ground reflections are charged where they land.** Each intermediate
+  bounce of a multi-hop circuit is classified against the coastlines at its
+  own reflection point, not against the path's dominant surface. A North
+  Atlantic circuit bounces off sea water and a polar one off ice, and
+  charging both as average ground is several dB per bounce in opposite
+  directions.
 - **Dipole field.** No regional anomalies, the South Atlantic Anomaly
   included.
 - **Group index `1/n`.** Exact for an isotropic cold plasma and a good
@@ -234,6 +372,11 @@ tracing, off-great-circle propagation, travelling ionospheric disturbances,
 spread F, Doppler, detailed terrain, and the positive/negative phase
 structure of geomagnetic storms.
 
+The ground wave *is* implemented, but its shadow region is the
+good-conductor limit of the residue series rather than a solution of the
+root equation, and it carries no terrain: a mountain between two stations
+is invisible to it.
+
 Solar wind speed and Bz are carried and displayed but do **not** enter the
 core equations. Their field documentation says so, rather than implying a
 coupling that does not exist.
@@ -273,6 +416,9 @@ the form an operational answer has to take.
 
 The known remaining weaknesses, in order: the layer parameterisation for D,
 F1 and F2 has never been checked against observation, so its error is
-unknown; the split of absorption between the D and E regions is uncalibrated
-and diverges near sunrise and sunset; and the equivalent column cannot
-produce horizontal refraction or off-great-circle paths at all.
+unknown; the solar-zenith scaling of absorption still runs shallower than
+the independent reference (+0.62 against +0.88), so the two diverge near
+sunrise and sunset; the ground wave's shadow region uses the
+good-conductor root and is optimistic over land beyond the horizon, where
+it is already 50 dB down; and the equivalent column cannot produce
+horizontal refraction or off-great-circle paths at all.

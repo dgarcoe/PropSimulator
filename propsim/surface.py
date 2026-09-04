@@ -17,7 +17,7 @@ from .coastlines import COASTLINES
 from .geodesy import GeoPoint, intermediate_point
 
 __all__ = ["classify_surface", "path_surface_profile", "ground_reflection_loss_db",
-           "SurfaceProfile"]
+           "path_sections", "SurfaceProfile"]
 
 #: Land outlines, shared with the web globe -- see
 #: :mod:`propsim.coastlines` for what they simplify and why.
@@ -70,6 +70,37 @@ def path_surface_profile(tx: GeoPoint, rx: GeoPoint, samples: int = 21) -> Surfa
     types = [classify_surface(p) for p in points]
     sea = sum(1 for t in types if t is GroundType.SALT_WATER) / len(types)
     return SurfaceProfile(tuple(types), sea)
+
+
+def path_sections(
+    tx: GeoPoint, rx: GeoPoint, distance_km: float, samples: int = 21
+) -> List[Tuple[float, GroundType]]:
+    """The path cut into contiguous ``(length_km, ground)`` stretches.
+
+    Adjacent stretches of the same ground are merged, so an all-sea path
+    comes back as one section rather than twenty identical ones -- which
+    matters, because Millington's method costs two attenuation evaluations
+    per section and the answer for a uniform path must not depend on how
+    finely it was sampled.
+
+    Each interval is classified at its own midpoint, not at its endpoints:
+    a coastline crossing then falls inside the interval it belongs to
+    instead of being counted at both ends of it.
+    """
+    if samples < 2:
+        raise ValueError("a path needs at least two samples to have sections")
+    count = samples - 1
+    step_km = distance_km / count
+    sections: List[Tuple[float, GroundType]] = []
+    for index in range(count):
+        ground = classify_surface(
+            intermediate_point(tx, rx, (index + 0.5) / count)
+        )
+        if sections and sections[-1][1] is ground:
+            sections[-1] = (sections[-1][0] + step_km, ground)
+        else:
+            sections.append((step_km, ground))
+    return sections
 
 
 def ground_reflection_loss_db(

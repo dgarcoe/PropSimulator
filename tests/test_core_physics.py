@@ -80,16 +80,60 @@ class TestPlasmaFrequency:
 
 
 class TestCollisionFrequency:
-    @pytest.mark.parametrize(
-        "height_km,reference",
-        [(60, 1.5e7), (70, 6e6), (80, 2.4e6), (90, 8e5), (120, 1e4)],
-    )
-    def test_matches_reference_profile(self, height_km, reference):
-        assert collision_frequency_hz(height_km) == pytest.approx(reference, rel=0.25)
+    """Derived from Banks' relation and the standard atmosphere.
+
+    These used to assert against a remembered table of values. That table
+    was internally inconsistent -- it implied a factor of ten between 100
+    and 110 km and only three over the next ten, which no smooth atmosphere
+    does -- and no polynomial of any degree fitted it better than 40%. The
+    tests now check the derivation instead of the table.
+    """
+
+    @pytest.mark.parametrize("height_km", [50, 60, 70, 80, 90, 100, 110, 120])
+    def test_matches_banks_from_the_standard_atmosphere(self, height_km):
+        from propsim.atmosphere import (
+            BANKS_COEFFICIENT,
+            neutral_density,
+            temperature,
+        )
+
+        expected = (
+            BANKS_COEFFICIENT
+            * neutral_density(height_km)
+            * math.sqrt(temperature(height_km))
+        )
+        assert collision_frequency_hz(height_km) == pytest.approx(expected, rel=1e-9)
+
+    def test_sits_in_the_published_range_where_absorption_happens(self):
+        """Order of magnitude, across the band that carries the loss."""
+        assert 1e7 < collision_frequency_hz(60) < 1e8
+        assert 1e6 < collision_frequency_hz(80) < 1e7
+        assert 1e5 < collision_frequency_hz(90) < 1e6
+        assert 1e4 < collision_frequency_hz(110) < 1e5
 
     def test_falls_monotonically(self):
-        values = [collision_frequency_hz(h) for h in range(50, 130, 5)]
+        values = [collision_frequency_hz(h) for h in range(45, 130, 5)]
         assert all(b < a for a, b in zip(values, values[1:]))
+
+    def test_is_smooth(self):
+        """Successive octaves of decay must not jump around: a kink here is
+        the signature of a table stitched from inconsistent sources."""
+        heights = list(range(55, 125, 5))
+        slopes = [
+            (math.log(collision_frequency_hz(b)) - math.log(collision_frequency_hz(a)))
+            / (b - a)
+            for a, b in zip(heights, heights[1:])
+        ]
+        for a, b in zip(slopes, slopes[1:]):
+            assert abs(b - a) < 0.05
+
+    def test_scalar_and_array_forms_agree(self):
+        from propsim.atmosphere import collision_frequency_array
+
+        heights = [55.0, 68.0, 83.5, 97.0, 112.0]
+        assert collision_frequency_array(heights) == pytest.approx(
+            [collision_frequency_hz(h) for h in heights], rel=1e-12
+        )
 
 
 class TestGeodesy:
@@ -315,17 +359,49 @@ class TestIonosphere:
         storm = self._profile(12, f107=140, kp=8).layers.fof2_mhz
         assert storm < calm
 
+    def _flare_profile(self, label):
+        return build_profile(
+            GeoPoint(40.4, -3.7),
+            datetime(2025, 6, 21, 12, tzinfo=UTC),
+            SpaceWeather(f107=140).with_flare(label),
+            seasonal_phase=0.9,
+        )
+
     def test_xray_flux_reaches_the_d_region(self):
         """The flare must change the D layer through the ionosphere, not
         through a multiplier bolted on to absorption afterwards."""
         quiet = self._profile(12, f107=140)
-        flare = build_profile(
-            GeoPoint(40.4, -3.7),
-            datetime(2025, 6, 21, 12, tzinfo=UTC),
-            SpaceWeather(f107=140).with_flare("X1"),
-            seasonal_phase=0.9,
-        )
-        assert flare.layers.d.peak_density > 50 * quiet.layers.d.peak_density
+        flare = self._flare_profile("X1")
+        assert flare.density_at(75.0) > 5 * quiet.density_at(75.0)
+
+    def test_a_flare_deposits_deep(self):
+        """Hard X-rays penetrate below the quiet D region. The enhancement
+        must therefore be much larger at 75 km than at 90 km -- that is the
+        whole reason a flare blacks out HF, since the collision frequency at
+        75 km is an order of magnitude higher."""
+        quiet = self._profile(12, f107=140)
+        flare = self._flare_profile("X1")
+        deep = flare.density_at(75.0) / quiet.density_at(75.0)
+        high = flare.density_at(90.0) / quiet.density_at(90.0)
+        assert deep > 2 * high
+
+    def test_flare_density_rises_with_class(self):
+        heights = [70.0, 75.0, 80.0]
+        previous = None
+        for label in ("A1", "C1", "M1", "X1", "X5"):
+            profile = self._flare_profile(label)
+            total = sum(profile.density_at(h) for h in heights)
+            if previous is not None:
+                assert total > previous
+            previous = total
+
+    def test_the_d_region_follows_the_published_profile(self):
+        """It climbs by two orders of magnitude from 70 to 90 km. A Chapman
+        layer forced on it is flat across that band and fourteen times too
+        low at 85 km, which moves absorption into the wrong region."""
+        profile = self._profile(12, f107=100)
+        for height, reference in ((70, 1e8), (80, 1e9), (85, 3e9), (90, 1e10)):
+            assert profile.density_at(height) == pytest.approx(reference, rel=1.2)
 
     def test_flare_leaves_f2_alone(self):
         quiet = self._profile(12, f107=140)

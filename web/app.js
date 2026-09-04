@@ -396,12 +396,20 @@ class Globe {
     // Two different things, drawn differently on purpose.
     //
     // The link path is how the signal actually reaches the receiver: the
-    // mode the budget was built from, repeated for each of its hops.
+    // mode the budget was built from, hop by hop.
     if (d.link_path) {
       const lp = d.link_path;
+      let travelled = 0;
       for (let i = 0; i < lp.hops; i++) {
-        const from = destination(tx, bearing, i * lp.hop_range_km);
-        drawArc(lp.arc.map(([f, h]) => ({ p: destination(from, bearing, f * lp.hop_range_km), h })),
+        // Each hop has its own range and its own arc: the ionosphere over
+        // the first hop of a terminator-crossing circuit is not the one
+        // over the last, and the hops reach different distances because
+        // of it.
+        const span = lp.hop_ranges_km[i];
+        const arc = lp.arcs[i];
+        const from = destination(tx, bearing, travelled);
+        travelled += span;
+        drawArc(arc.map(([f, h]) => ({ p: destination(from, bearing, f * span), h })),
                 'rgba(69,199,224,.92)', 2);
       }
     }
@@ -500,11 +508,18 @@ function drawCoverage(svg, data, target) {
   const S = data.samples;
   const xs = S.map(s => s.distance_km);
   const xmin = Math.min(...xs), xmax = Math.max(...xs);
-  const vals = S.filter(s => s.reached).flatMap(s => [s.field_strength_dbuv_m, s.snr_db]);
+  // The ground wave is plotted on the same axes but only where it is worth
+  // seeing: a surface field 150 dB under the noise would otherwise drag the
+  // vertical scale down until the skywave curve was a flat line.
+  const groundFloor = -40;
+  const ground = S.filter(s => s.ground_wave_field_dbuv_m !== null
+                            && s.ground_wave_field_dbuv_m > groundFloor);
+  const vals = S.filter(s => s.reached).flatMap(s => [s.field_strength_dbuv_m, s.snr_db])
+    .concat(ground.map(s => s.ground_wave_field_dbuv_m));
   if (!vals.length) {
     // An empty chart looks like a failure to compute. It is not: at this
-    // frequency nothing lands anywhere in range, and saying so is the
-    // result.
+    // frequency nothing lands anywhere in range by either route, and saying
+    // so is the result.
     svg.append(el('text', { x: W / 2, y: H / 2, fill: '#5d7488', 'font-size': 11,
                             'text-anchor': 'middle' },
                   `nothing reaches any distance at ${data.frequency_mhz.toFixed(2)} MHz`));
@@ -539,6 +554,14 @@ function drawCoverage(svg, data, target) {
   }
   for (const r of runsOf(S, s => s.field_strength_dbuv_m)) polyline(svg, r.map(([x, y]) => [xOf(x), yOf(y)]), '#45c7e0', 1.6);
   for (const r of runsOf(S, s => s.snr_db)) polyline(svg, r.map(([x, y]) => [xOf(x), yOf(y)]), '#54d18b', 1.6);
+  // Drawn last and dashed: inside the skip zone it is the only field there
+  // is, and outside it, watching it fall away under the skywave is the
+  // point of having both on one pair of axes.
+  for (const r of runsOf(S, s => (s.ground_wave_field_dbuv_m !== null
+                                  && s.ground_wave_field_dbuv_m > groundFloor)
+                                 ? s.ground_wave_field_dbuv_m : null)) {
+    polyline(svg, r.map(([x, y]) => [xOf(x), yOf(y)]), '#b58ce0', 1.4, '5 3');
+  }
 
   if (target >= xmin && target <= xmax) {
     polyline(svg, [[xOf(target), pad.t], [xOf(target), H - pad.b]], '#8aa0b5', 1, '3 3');
@@ -715,7 +738,7 @@ function row(name, value, unit, tone) {
 function renderReadout(d) {
   const host = document.getElementById('readout');
   if (!d) { host.innerHTML = '<div class="status"><div class="label">…</div></div>'; return; }
-  const i = d.ionosphere, r = d.ray, b = d.budget, g = d.geometry;
+  const i = d.ionosphere, r = d.ray, b = d.budget, g = d.geometry, w = d.ground_wave;
   const marginTone = m => m === null || m === undefined ? 'bad' : m >= 10 ? 'good' : m >= 0 ? 'warn' : 'bad';
 
   let html = `<div class="status ${d.status.tone}">
@@ -750,9 +773,32 @@ function renderReadout(d) {
       row('Fade margin (90%)', '−' + fmt(b.fade_margin_db, 1), 'dB') +
       row('Link margin', fmt(b.effective_margin_db, 1), 'dB', marginTone(b.effective_margin_db));
   } else {
-    html += row('Link', 'no ray reaches the receiver', '', 'bad');
+    html += row('Skywave', 'no ray reaches the receiver', '', 'bad');
   }
   html += `</div>`;
+
+  // The surface route, shown whether or not it wins. Inside the skip zone
+  // it is the only thing there is; outside it, seeing how far down it sits
+  // is the point.
+  if (w) {
+    html += `<div class="rgroup"><h4>Ground wave</h4>`;
+    if (w.significant) {
+      html += row('Over sea', fmt(w.sea_fraction * 100, 0), '%', 'on') +
+        row('Surface loss', fmt(w.surface_loss_db, 1), 'dB') +
+        row('Curvature loss', fmt(w.curvature_loss_db, 1), 'dB') +
+        row('Received power', fmt(w.received_power_dbm, 1), 'dBm') +
+        row('Group delay', fmt(w.delay_ms, 2), 'ms') +
+        row('Link margin', fmt(w.margin_db, 1), 'dB', marginTone(w.margin_db));
+    } else {
+      // Past this point the numbers stop meaning anything: the loss may
+      // have hit the model's own cap, and either way the surface route is
+      // further under the requirement than any measure could recover.
+      html += row('Surface route',
+                  w.saturated ? 'out of range' : fmt(-w.margin_db, 0) + ' dB short',
+                  '', 'bad');
+    }
+    html += `</div>`;
+  }
 
   html += `<div class="rgroup"><h4>Path</h4>` +
     row('Distance', fmt(g.distance_km, 0), 'km') +

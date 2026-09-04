@@ -25,7 +25,7 @@ from propsim.coverage import (
     distance_grid,
     usable_band_vs_distance,
 )
-from propsim.engine import PropagationEngine
+from propsim.engine import FrequencyReport, PropagationEngine
 from propsim.magnetic import geomagnetic_latitude_deg
 from propsim.raytrace import RayMedium, trace_ray
 from propsim.refractive import Mode
@@ -352,11 +352,21 @@ def link(request: DashboardRequest) -> dict:
 
     link_path = None
     if best is not None:
-        step = max(1, len(best.path.samples) // 40)
+        # One arc per hop, not one arc repeated.  Each hop of the circuit is
+        # traced through the ionosphere above its own stretch of the path,
+        # so on a circuit crossing the terminator they genuinely differ --
+        # and drawing the first hop five times puts the far end of the line
+        # somewhere the signal never goes.
+        arcs = []
+        for hop_path in best.paths or (best.path,):
+            step = max(1, len(hop_path.samples) // 40)
+            arcs.append(
+                [[fraction, height] for height, fraction in hop_path.samples[::step]]
+            )
         link_path = {
             "hops": best.hops,
-            "hop_range_km": best.path.ground_range_km,
-            "arc": [[fraction, height] for height, fraction in best.path.samples[::step]],
+            "hop_ranges_km": list(best.hop_ranges_km) or [best.path.ground_range_km],
+            "arcs": arcs,
         }
 
     if best is not None:
@@ -383,15 +393,58 @@ def link(request: DashboardRequest) -> dict:
     else:
         budget_out = None
 
+    wave = report.ground_wave
+    ground_wave_out = None
+    if wave is not None:
+        ground_wave_out = {
+            "margin_db": wave.margin_db,
+            "snr_db": wave.budget.snr_db,
+            "received_power_dbm": wave.budget.received_power_dbw + 30.0,
+            "excess_loss_db": wave.loss.total_db,
+            "surface_loss_db": wave.loss.surface_db,
+            "curvature_loss_db": wave.loss.curvature_db,
+            "sea_fraction": wave.loss.sea_fraction,
+            "delay_ms": wave.group_delay_ms,
+            "usable": wave.margin_db >= 0.0,
+            # Past the cap the loss stopped being a measurement, and a
+            # panel reading "curvature loss 300.0 dB" would be presenting
+            # the model's own full stop as a result.
+            "saturated": wave.loss.saturated,
+            # A route this far under what the operator asked for cannot be
+            # recovered by anything: the same 40 dB that makes an arrival
+            # negligible against another one makes it negligible against a
+            # requirement. Below that the panel says so instead of printing
+            # six numbers about a wave that is not there.
+            "significant": wave.margin_db > -FrequencyReport.NEGLIGIBLE_ARRIVAL_DB,
+        }
+
+    # The two routes are ranked on their margins, and NO PATH is reserved
+    # for having neither. A path with no skywave is not a dead path if the
+    # ground wave carries it -- below the skip distance the surface route
+    # is the *only* route -- and reporting NO PATH there described the
+    # model rather than the link. A ground wave far under the requirement
+    # is not offered as a route at all, so it cannot soften a genuinely
+    # dead path into "below threshold" either.
     margin = report.effective_margin_db()
-    if margin is None:
-        status = {"label": "NO PATH", "tone": "bad", "note": "no ray reaches the receiver"}
-    elif margin >= 10.0:
-        status = {"label": "SOLID LINK", "tone": "good", "note": "comfortable margin"}
-    elif margin >= 0.0:
-        status = {"label": "WEAK COVERAGE", "tone": "warn", "note": "marginal margin"}
+    candidates = []
+    if margin is not None:
+        candidates.append((margin, "skywave"))
+    if ground_wave_out is not None and ground_wave_out["significant"]:
+        candidates.append((wave.margin_db, "ground wave"))
+    best_margin, route = max(candidates) if candidates else (None, "neither")
+
+    if best_margin is None:
+        status = {"label": "NO PATH", "tone": "bad",
+                  "note": "no ray reaches the receiver and no ground wave survives"}
+    elif best_margin >= 10.0:
+        status = {"label": "SOLID LINK", "tone": "good",
+                  "note": f"comfortable margin via {route}"}
+    elif best_margin >= 0.0:
+        status = {"label": "WEAK COVERAGE", "tone": "warn",
+                  "note": f"marginal margin via {route}"}
     else:
-        status = {"label": "BELOW THRESHOLD", "tone": "bad", "note": "margin is negative"}
+        status = {"label": "BELOW THRESHOLD", "tone": "bad",
+                  "note": f"margin is negative on the best route ({route})"}
 
     sun = subsolar_point(scenario.when)
     tx, rx = scenario.transmitter.location, scenario.receiver.location
@@ -420,6 +473,7 @@ def link(request: DashboardRequest) -> dict:
             "fan": fan,
         },
         "budget": budget_out,
+        "ground_wave": ground_wave_out,
         "link_path": link_path,
         "geometry": {
             "tx": [tx.lat_deg, tx.lon_deg],

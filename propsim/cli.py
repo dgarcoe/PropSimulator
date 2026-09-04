@@ -231,6 +231,27 @@ def render(prediction) -> str:
         "below the MUF and antenna practicality. They are not probabilities.",
         "Run with --reliability for the fraction of days each band works.",
     ]
+
+    surface = [row for row in prediction.ground_wave_report() if row["usable"]]
+    if surface:
+        lines += [
+            "",
+            "Ground wave (along the surface, no ionosphere involved)",
+            f"{'band':>6} {'MHz':>7} {'SNR':>7} {'margin':>8} {'excess':>8} {'sea':>5}",
+        ]
+        for row in surface:
+            lines.append(
+                f"{row['band']:>6} {row['frequency_mhz']:7.2f} {row['snr_db']:7.1f} "
+                f"{row['margin_db']:8.1f} {row['excess_loss_db']:8.1f} "
+                f"{row['sea_fraction'] * 100:4.0f}%"
+            )
+        lines += [
+            "",
+            "'excess' is loss below free space: surface dissipation plus earth",
+            "curvature. It assumes a vertically polarised antenna at each end --",
+            "a horizontal one couples to the surface wave far more weakly, and",
+            "the margins above already charge whichever antennas you specified.",
+        ]
     return "\n".join(line for line in lines if line is not None)
 
 

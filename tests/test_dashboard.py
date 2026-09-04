@@ -174,15 +174,83 @@ class TestDashboardApi:
             assert isinstance(d["ionosphere"][key], float)
         assert d["ray"]["arc"] and len(d["ray"]["arc"][0]) == 2
 
+    def test_the_ground_wave_block_carries_what_the_panel_reads(self):
+        d = client.post("/api/link", json=request_body()).json()
+        wave = d["ground_wave"]
+        assert wave is not None
+        for key in ("margin_db", "snr_db", "excess_loss_db", "surface_loss_db",
+                    "curvature_loss_db", "sea_fraction", "delay_ms",
+                    "usable", "saturated", "significant"):
+            assert key in wave, key
+        assert wave["excess_loss_db"] == pytest.approx(
+            wave["surface_loss_db"] + wave["curvature_loss_db"]
+        )
+
+    def test_a_short_link_below_the_skip_zone_is_carried_and_labelled(self):
+        """A 100 km link on 80 metres, and the page has to say how.
+
+        There is no skywave at this distance and frequency. Before the
+        surface route existed the panel said NO PATH, which is not a
+        cautious answer to a routine local contact but a wrong one.
+        """
+        body = request_body(
+            transmitter={"lat": 43.4, "lon": -8.4, "height_m": 15, "power_w": 1000},
+            receiver={"lat": 43.4, "lon": -9.6, "height_m": 15},
+            frequency_mhz=3.65, launch_angle_deg=40.0,
+        )
+        d = client.post("/api/link", json=body).json()
+        wave = d["ground_wave"]
+        assert wave["significant"] and not wave["saturated"]
+        assert wave["sea_fraction"] > 0.9
+        assert d["status"]["label"] != "NO PATH"
+
+    def test_a_hopeless_surface_route_is_flagged_rather_than_printed(self):
+        """7500 km on 20 metres: the model stops counting, and says so.
+
+        A capped loss reported as '300.0 dB' would be presenting the
+        model's own full stop as a measurement.
+        """
+        d = client.post("/api/link", json=request_body()).json()
+        wave = d["ground_wave"]
+        assert not wave["significant"]
+        assert wave["saturated"]
+
+    def test_the_status_note_names_the_route_it_judged(self):
+        d = client.post("/api/link", json=request_body()).json()
+        assert "skywave" in d["status"]["note"] or "ground wave" in d["status"]["note"]
+
     def test_the_drawn_link_path_lands_on_the_receiver(self):
-        """The globe repeats one hop along the bearing, so the hops times the
-        hop range has to come out at the path length or the drawn line stops
-        short of the marker."""
+        """The globe lays the hops end to end along the bearing, so their
+        ranges have to add up to the path length or the drawn line stops
+        short of the marker.
+
+        Not ``hops * hop_range``: the hops of one circuit reach different
+        distances, because each is traced through the ionosphere above its
+        own stretch of the path.  Multiplying the first hop by the hop
+        count would be right only for a circuit whose ionosphere is the
+        same from end to end.
+        """
         d = client.post("/api/link", json=request_body()).json()
         lp = d["link_path"]
         assert lp is not None
-        total = lp["hops"] * lp["hop_range_km"]
+        assert len(lp["hop_ranges_km"]) == lp["hops"]
+        assert len(lp["arcs"]) == lp["hops"]
+        total = sum(lp["hop_ranges_km"])
         assert total == pytest.approx(d["geometry"]["distance_km"], rel=2e-3)
+
+    def test_the_hops_of_one_circuit_are_allowed_to_differ(self):
+        """A terminator-crossing circuit must not report identical hops.
+
+        Madrid to Tokyo at this hour is 22% sunlit: the first hop climbs
+        into a daylit F2 and the last into a night-time one, and foF2 runs
+        from 8.3 to 6.0 MHz along it.  If every hop comes back the same
+        length, the per-hop ionosphere has quietly stopped being used.
+        """
+        d = client.post("/api/link", json=request_body()).json()
+        ranges = d["link_path"]["hop_ranges_km"]
+        if len(ranges) < 2:
+            pytest.skip("this circuit is a single hop")
+        assert max(ranges) - min(ranges) > 1.0
 
     def test_an_escaping_ray_is_reported_not_hidden(self):
         d = client.post("/api/link", json=request_body(frequency_mhz=29.0,

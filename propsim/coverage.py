@@ -33,11 +33,38 @@ __all__ = ["CoverageSample", "UsableBandSample", "coverage_vs_distance",
            "usable_band_vs_distance", "distance_grid", "frequency_grid"]
 
 
+#: Where the near field stops being the interesting part of a coverage
+#: curve.  Below this the ground wave carries the link and the skywave has
+#: not started; above it the skip zone and the hop structure decide
+#: everything, and they are features of thousands of kilometres, not tens.
+NEAR_FIELD_KM = 500.0
+
+
 def distance_grid(maximum_km: float = 12000.0, points: int = 40) -> List[float]:
-    """Distances to sample, starting clear of the transmitter itself."""
-    start = max(100.0, maximum_km / points)
-    step = (maximum_km - start) / max(points - 1, 1)
-    return [start + i * step for i in range(points)]
+    """Distances to sample, starting clear of the transmitter itself.
+
+    Geometric below :data:`NEAR_FIELD_KM` and uniform above it.  A purely
+    uniform grid out to 12 000 km puts its first sample at 300 km, which is
+    past the whole of the ground wave on the higher bands and past the
+    near edge of the skip zone on the lower ones -- so the curve begins
+    after the two most interesting things on it have already happened.
+    Geometric spacing near in costs nothing: the same few samples resolve
+    30 km and 300 km, where a uniform grid resolves neither.
+    """
+    if points < 2:
+        return [min(NEAR_FIELD_KM, maximum_km)]
+    if maximum_km <= NEAR_FIELD_KM:
+        step = maximum_km / points
+        return [step * (i + 1) for i in range(points)]
+
+    near_points = max(2, points // 4)
+    far_points = points - near_points
+    start = min(25.0, maximum_km / points)
+    ratio = (NEAR_FIELD_KM / start) ** (1.0 / near_points)
+    near = [start * ratio**i for i in range(near_points)]
+    step = (maximum_km - NEAR_FIELD_KM) / max(far_points - 1, 1)
+    far = [NEAR_FIELD_KM + i * step for i in range(far_points)]
+    return near + far
 
 
 def frequency_grid(low_hz: float = 2e6, high_hz: float = 32e6, points: int = 25) -> List[float]:
@@ -59,6 +86,22 @@ class CoverageSample:
     noise_floor_dbm: Optional[float] = None
     snr_db: Optional[float] = None
     margin_db: Optional[float] = None
+    #: The surface-wave route at this distance, which exists whether or not
+    #: a ray lands here.  Kept as its own column rather than folded into
+    #: the skywave one: a coverage chart that merged them would fill the
+    #: skip zone in and hide the very thing it is drawn to show.
+    ground_wave_margin_db: Optional[float] = None
+    ground_wave_field_dbuv_m: Optional[float] = None
+    ground_wave_loss_db: Optional[float] = None
+
+    @property
+    def best_margin_db(self) -> Optional[float]:
+        """The better of the two routes, whichever it is."""
+        candidates = [
+            value for value in (self.margin_db, self.ground_wave_margin_db)
+            if value is not None
+        ]
+        return max(candidates) if candidates else None
 
     def summary(self) -> dict:
         return {
@@ -72,6 +115,10 @@ class CoverageSample:
             "noise_floor_dbm": self.noise_floor_dbm,
             "snr_db": self.snr_db,
             "margin_db": self.margin_db,
+            "ground_wave_margin_db": self.ground_wave_margin_db,
+            "ground_wave_field_dbuv_m": self.ground_wave_field_dbuv_m,
+            "ground_wave_loss_db": self.ground_wave_loss_db,
+            "best_margin_db": self.best_margin_db,
         }
 
 
@@ -82,19 +129,37 @@ def coverage_vs_distance(
 ) -> List[CoverageSample]:
     """Field strength and SNR against distance at one frequency.
 
-    A distance with no entry in the returned curve is not a weak signal; it
-    is a distance no ray lands on.  Skip zones therefore appear as genuine
-    gaps rather than as a dip, which is the whole point of solving for the
-    launch angle instead of scaling a hop.
+    ``reached`` is a statement about the **skywave**: a distance where it is
+    false is one no ray lands on, so skip zones appear as genuine gaps
+    rather than as a dip, which is the whole point of solving for the
+    launch angle instead of scaling a hop.  The ground wave is reported
+    alongside it in its own columns, because inside the skip zone it is
+    frequently the only thing there is -- and because merging the two
+    curves would paper over exactly the gap this function exists to show.
     """
     distances = list(distances_km) if distances_km is not None else distance_grid()
     samples: List[CoverageSample] = []
 
     for distance in distances:
         report = engine.evaluate(frequency_hz, distance_km=distance)
+        ground_wave = report.ground_wave
+        surface = {}
+        if ground_wave is not None:
+            surface = {
+                "ground_wave_margin_db": ground_wave.margin_db,
+                "ground_wave_loss_db": ground_wave.loss.total_db,
+                "ground_wave_field_dbuv_m": field_strength_dbuv_per_m(
+                    ground_wave.budget.received_power_dbw,
+                    ground_wave.budget.receive_gain_dbi,
+                    frequency_hz,
+                ),
+            }
+
         best = report.best
         if best is None:
-            samples.append(CoverageSample(distance_km=distance, reached=False))
+            samples.append(
+                CoverageSample(distance_km=distance, reached=False, **surface)
+            )
             continue
 
         budget = best.budget
@@ -107,12 +172,13 @@ def coverage_vs_distance(
             reached=True,
             hops=best.hops,
             launch_elevation_deg=best.launch_elevation_deg,
-            apex_height_km=best.path.apex_height_km,
+            apex_height_km=best.apex_height_km,
             field_strength_dbuv_m=field,
             received_power_dbm=budget.received_power_dbw + 30.0,
             noise_floor_dbm=budget.noise.noise_power_dbw + 30.0,
             snr_db=budget.snr_db,
             margin_db=best.margin_db,
+            **surface,
         ))
     return samples
 
